@@ -97,6 +97,7 @@ class loginAnalysis:
         #config = Config(NEO4J_URI, "neo4j", "foofoofoo")
         #g = Graph(config)
         #g.add_proxy("funcs", Funcdef)
+        # a pointless comment to test arc
 
         for path, tree in self.__paths_to_ast.items():
             for node in ast.walk(tree):
