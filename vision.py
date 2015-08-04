@@ -12,10 +12,27 @@ from bulbs.model import Node, Relationship
 from bulbs.property import String, Integer, DateTime, Null
 from bulbs.utils import current_datetime
 
-class Funcdef(Node):
-    element_type = "function definition"
-    name = String(nullable=False)
-    #routable = Null()
+
+
+
+
+
+
+
+
+"""
+Rule families
+
+1. Ast rules. Simple as they operate upon the AST
+2. CFG rules. Don't know of any but they might exist, maybe around toctou or race conditions on files?
+3. Dataflow rules. xss/sqli/etc
+4. Human - blacklist of people who write bugs, interns, new people etc
+5. Experimential - codebase analysis, person x commits to this area a bunch but this is their first commit to area y.
+
+"""
+
+
+
 
 class funcPrinter(ast.NodeVisitor):
     def visit_FunctionDef(self, node):
@@ -26,14 +43,24 @@ class funcPrinter(ast.NodeVisitor):
 class funk:
     def __init__(self, ast_tree=None):
         self.tree = ast_tree
-        self.decos = {}
+        self.decos = []
+        self.is_routable = False
+
+class codeBundle:
+    def __init__(self, path, tree):
+        self.path = path
+        self.tree = tree
+        self.funcs = []
+        self.git_jonx = []
 
 class loginAnalysis:
     def __init__(self, base_file_dir=None, existing_ast=None):
         self.__base_file_dir = base_file_dir
         self.__existing_ast = existing_ast
-        self.__paths_to_ast = {}
         self.__routable = []
+        # filename : code bundle
+        # codebundle = { full path, list of functions, git history? } 
+        self.__fn_to_cb = {}
 
     def injest_dir(self, rootdir):
         if not os.path.isdir(rootdir):
@@ -47,7 +74,8 @@ class loginAnalysis:
                     fullpath = root + os.sep + f
                     contents = file(fullpath).read()
                     tree = ast.parse(contents)
-                    self.__paths_to_ast[fullpath] = tree
+                    c = codeBundle(fullpath, tree)
+                    self.__fn_to_cb[fullpath] = c
 
         #pp = pprint.PrettyPrinter(indent=4)
         #pp.pprint(self.__paths_to_ast)
@@ -79,7 +107,6 @@ class loginAnalysis:
                     return True
 
         """
-
         Call(func=Attribute(value=Name(id='app', ctx=Load()), attr='route', ctx=Load()),
 
             Call(func=Attribute(value=Name(id='app', ctx=Load()), attr='route', ctx=Load()), args=[
@@ -92,41 +119,49 @@ class loginAnalysis:
         """
 
     def determine_routability(self):
-        assert self.__paths_to_ast.keys() > 0
+        assert self.__fn_to_cb.keys() > 0
+
         #print 'building graph.........'
         #config = Config(NEO4J_URI, "neo4j", "foofoofoo")
         #g = Graph(config)
         #g.add_proxy("funcs", Funcdef)
         # a pointless comment to test arc
 
-        for path, tree in self.__paths_to_ast.items():
-            for node in ast.walk(tree):
+        for path, cb in self.__fn_to_cb.items():
+            for node in ast.walk(cb.tree):
                 if isinstance(node, ast.FunctionDef):
+                    f = funk()
+                    f.tree = node
                     if hasattr(node, "decorator_list"):
                         if len(node.decorator_list) > 0:
+                            f.decos = node.decorator_list
                             for deco in node.decorator_list:
                                 if self.is_routable(deco):
-                                    print node.name
                                     self.__routable.append(node)
+                                    f.is_routable = True
 
-    # I envision a bundle of decos so I can say give me all routable funcs that also have csrf.excempt and begin with create_
-    def fill_out_decorators(self):
-        assert self.__routable > 0
+                    cb.funcs.append(f)
+
+    def get_all_routable_funcs(self):
+        for fn, cb in self.__fn_to_cb.items():
+            for f in cb.funcs:
+                if f.is_routable:
+                    print fn + " +" + str(f.tree.lineno), f.tree.name
+
+ 
+
+    def rule_no_csrf_protection(self):
+        for fn, cb in self.__fn_to_cb.items():
+            for f in cb.funcs:
+                if f.is_routable:
+                    # its routable so check if csrf.exempt is on
+                    for dec in f.decos:
+                        if isinstance(dec, ast.Attribute):
+                            if dec.value.id == 'csrf' and dec.attr == 'exempt':
+                                print "csrf protection turned off -> ",fn + " +" + str(f.tree.lineno), f.tree.name
+                                #Attribute(value=Name(id='csrf', ctx=Load()), attr='exempt', ctx=Load())
 
 
-        for f in self.__routable:
-            decos = {}
-            for n in ast.walk(f):
-                pass
-
-
-
-
-        # for each file parse as ast
-        # store in graph db... but how... each function?
-
-        #module -> (all funcs)->body of func)
-    
 
 def usage():
     if len(sys.argv) < 2:
@@ -149,6 +184,8 @@ def main():
     la = loginAnalysis()
     la.injest_dir(target_dir)
     la.determine_routability()
+    #la.rule_no_csrf_protection()
+    la.get_all_routable_funcs()
 
 
 
