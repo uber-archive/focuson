@@ -294,12 +294,41 @@ class loginAnalysis:
                 t = (tn, combined) 
                 final_unsafe_tn_vn_pairs.append(t)
 
-        for (tn, v) in final_unsafe_tn_vn_pairs:
-            print tn, v
+        unsafe_template_names = [ tn for (tn, v) in final_unsafe_tn_vn_pairs] 
+
+
         # given listen of instances of |safe being used, get variable name and template file name (templates/signup_landing.html) and find all routable funcs that have a render_template() call using that template filename
         # for every render_template() parse the function body looking for the variable name being passed in to render_template
         # Check if that variable is user-controlled ($var = request.args['foo'])
-        
+        for path, cb in self.__fn_to_cb.items():
+            for node in ast.walk(cb.tree):
+                if isinstance(node, ast.Call) and hasattr(node.func, 'attr'):
+                    if node.func.attr == "render_template":
+                        template_string_arg = node.args[0].s
+
+                        # TODO if a |safe is identified in a base.html its included into other things. We currently miss this. Fixable.
+                        print template_string_arg
+                        
+                        #print astpp.dump(node)
+                        
+                        if template_string_arg in unsafe_template_names:
+                            # A usage of a template that we know has an unsafe variable!
+                            print ' A HIT!'
+                            print astpp.dump(node)
+
+                            """
+                            At this point we have a few paths
+                            1. We can match on the ast for very simple cases, ex:
+                                return flask.render_template( 'collin_vulnerable.html', collin_error=flask.request.args.get('query'))
+                            2. We can follow assignments naively, ex: 
+                                blah = flask.request.args['foo'] 
+                                return flask.render_template( 'collin_vulnerable.html', collin_error=blah)
+                            3. We can do real dataflow analysis.
+
+                            #3 is the best option but can't be done in one day so just do #1 right now to get end to end working.
+                            """
+ 
+
 
 def usage():
     if len(sys.argv) < 2:
