@@ -1,2 +1,2 @@
-source venv/bin/activate
+Enter venv: source venv/bin/activate
 

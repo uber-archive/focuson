@@ -295,6 +295,10 @@ class loginAnalysis:
                 final_unsafe_tn_vn_pairs.append(t)
 
         unsafe_template_names = [ tn for (tn, v) in final_unsafe_tn_vn_pairs] 
+        unsafe_template_side_variable_names = [v[0] for (tn, v) in final_unsafe_tn_vn_pairs]
+
+        # TODO: possible refactor to use a dict the whole time, feels more fitting datatype
+        final_unsafe_tn_vn_pairs = dict(final_unsafe_tn_vn_pairs)
 
 
         # given listen of instances of |safe being used, get variable name and template file name (templates/signup_landing.html) and find all routable funcs that have a render_template() call using that template filename
@@ -303,23 +307,38 @@ class loginAnalysis:
         for path, cb in self.__fn_to_cb.items():
             for node in ast.walk(cb.tree):
                 if isinstance(node, ast.Call) and hasattr(node.func, 'attr'):
+                    # >1 means its render_template('foo.html', blah=blah_var) at least and not just render_template('foo.html')
+                    #if node.func.attr == "render_template" and len(node.args) > 1:
                     if node.func.attr == "render_template":
-                        template_string_arg = node.args[0].s
+                        template_filename_arg = node.args[0].s
 
                         # TODO if a |safe is identified in a base.html its included into other things. We currently miss this. Fixable.
-                        print template_string_arg
+                        # TODO #2 - need to be more generic about paths, someone might do render_template('templates/foo.html') or render_template('foo.html') with the templates/ dir assumed
                         
-                        #print astpp.dump(node)
-                        
-                        if template_string_arg in unsafe_template_names:
-                            # A usage of a template that we know has an unsafe variable!
-                            print ' A HIT!'
-                            print astpp.dump(node)
+                        # A render_template instance using a a template we know has an unsafe variable
+                        if template_filename_arg in final_unsafe_tn_vn_pairs.keys():
+                            """
+                            This handles the following case
+                            render_template('danger.html', var_foo=request.args.get('query'), var_bar="blah")
+                            var_foo, var_bar are both keywords.
+                            """
+                            if len(node.keywords) > 0:
+                                for k in node.keywords:
+                                    # The dangerous render_template() call is filling a template side variable we know is dangerous, if it is user-controlled on the python side then we have a vuln!
+                                    if k.arg in final_unsafe_tn_vn_pairs[template_filename_arg]:
+                                        v = k.value
+                                        if isinstance(v, ast.Call):
+                                            if v.func.value.value.value.id == 'flask' and v.func.value.value.attr == 'request' \
+                                            and v.func.value.attr == 'args' and v.func.attr == 'get' and isinstance(v.args[0], ast.Str):
+                                                print 'WIUNNER -> ' + repr(k.arg) + " in " + template_filename_arg
+                                                print repr(v.args[0].s)
+
 
                             """
                             At this point we have a few paths
                             1. We can match on the ast for very simple cases, ex:
                                 return flask.render_template( 'collin_vulnerable.html', collin_error=flask.request.args.get('query'))
+                                Handle flask.request.args.get(), flask.request.args['foo'], *.request.args.*
                             2. We can follow assignments naively, ex: 
                                 blah = flask.request.args['foo'] 
                                 return flask.render_template( 'collin_vulnerable.html', collin_error=blah)
