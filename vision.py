@@ -33,6 +33,17 @@ Rule families
 
 Specific future rules to write
 1. <script> inside an .html template, see login/templates/analytics.html and login/views/base.py. Send to human.
+example: https://code.uberinternal.com/D220082
+2. Copy robs rule around making a new jinja2 env since its easy to try, and fail, to turn on auto-escaping
+3. Robs sqli examples
+4. Add more to template xss rule, can also be done this way:
+    template = Template(survey.message)
+    final_message = template.render(url=final_url)
+5. HTTP response splitting
+6. XXE
+7. yaml.load() https://code.uberinternal.com/D207794
+8. pickle.load, http://kevinlondon.com/2015/08/15/dangerous-python-functions-pt2.html
+9. Robs existing bandit rule for new jinja2 environs
 """
 
 
@@ -185,6 +196,31 @@ class loginAnalysis:
           ], keywords=[], starargs=None, kwargs=None)
         """
 
+
+    def build_dataflow_graph(self):
+        pass
+        # Big time.
+
+    def build_list_of_uc_inputs(self):
+        """
+        Within a given procedure/function get user-controlled inputs. Examples:
+        1. foo = flask.request.args.get('foo')
+        2. foo = request.args.get('foo')
+        3. foo = request.args['foo']
+        4.  @app.route('/survey/<survey_id>', methods=['GET'])
+            def query_survey(survey_id):
+        """
+        pass
+
+
+    def find_template_dir(self):
+        # web-p2 is web-p2/partners/templates
+        # login is login/templates
+        pass
+
+    def nop_filter(s):
+        return s
+
     def rule_find_incredibly_simple_jinja_xss(self):
         assert self.__base_file_dir
         # There are 5-10 more complex variations needed to cover our bases here, this is the very first and simple one I can do without "real" dataflow analysis.
@@ -193,26 +229,58 @@ class loginAnalysis:
         unsafe_tn_vn_pairs = []
 
         # Get template dir
-        for root, subdir, files in os.walk(self.__base_file_dir):
-            if "templates" in subdir:
-                template_dir = os.getcwd() + os.sep + root + os.sep + "templates"
+        template_dir = self.__base_file_dir + os.sep + "templates"
+        print 'template dir....: ' + template_dir
+        # TODO this needs to really sniff around for any .html and evaluate it if its a jinja template, not just look in one dumb static directory
+
 
         # Transform templates from html -> py
         tloader = jinja2.FileSystemLoader(template_dir)
         env = jinja2.Environment(loader=tloader)
-        for tn in env.list_templates():
+
+        # add bogus filters so we can actually parse the damn thing... can be smarter about this
+        filters_to_add = {
+            'tojson' : self.nop_filter,
+            'escapejs': self.nop_filter,
+            'filter_input_type' : self.nop_filter,
+            'filter_input_name' : self.nop_filter,
+            'date' : self.nop_filter,
+            'time' : self.nop_filter,
+            'currency' : self.nop_filter,
+            'json' : self.nop_filter,
+            'filter_attributes' : self.nop_filter,
+            'decode_list_attr' : self.nop_filter,
+            'datetime' : self.nop_filter,
+            'parse_date' : self.nop_filter,
+            'datetime' : self.nop_filter,
+            'duration' : self.nop_filter,
+        }
+        env.filters.update(filters_to_add)
+
+        for tn in env.list_templates(".html"):
             try:
                 source, filename, _ = env.loader.get_source(env, tn)
                 code = env.compile(source, tn, filename, True, True)
+                # uncomment to see python version of jinja template..
+                #print code
                 parse_tree_of_templates = ast.parse(code)
                 self.__templates[tn] = parse_tree_of_templates
             except jinja2.exceptions.TemplateSyntaxError as e:
-                #print 'Could not compile "%s": %s' % (tn, e)
+                print 'Could not compile "%s": %s' % (tn, e)
+                # After extensive research: if we hit this then we are not considering this template... find a way to make it ignore missing filters/modules/etc since this will come up a lot
                 continue
+            except UnicodeDecodeError, e:
+                print "Unicode problems with %s" % tn
+                continue
+
+        print "Processing %d py files and %d / %d templates..." % (len(self.__fn_to_cb.keys()), len(self.__templates.keys()), len(env.list_templates(".html")))
 
         # Scan/visit the py for  t_1 = environment.filters['safe']
         for tn, tree in self.__templates.items():
             for node in ast.walk(tree):
+
+                #print astpp.dump(node)
+
                 # First step  - find the assignment of the |safe filter to a temp function
                 if isinstance(node, ast.Assign):
                     """
@@ -238,11 +306,13 @@ class loginAnalysis:
                                         unsafe_tn_fn_pairs.append( (tn, safe_func_alias_name))
         
         # Second step - find the call of the temp function (representing |safe) upon a variable
+        # TODO this should obviously not be just 1 and 2 cases, it should handle any depth of nested filters
         for (tn, safe_func_alias_name) in unsafe_tn_fn_pairs:
             for node in ast.walk(self.__templates[tn]):
                 if isinstance(node, ast.Call):
                     if hasattr(node.func, 'id'):
                         if node.func.id == safe_func_alias_name:
+                            # This is the one filter case, ex: {{foo | safe}}
                             if hasattr(node, 'args') and hasattr(node.args[0], 'id'):
                                 v = str(node.args[0].id)
                                 unsafe_tn_vn_pairs.append( (tn, v))
@@ -251,6 +321,23 @@ class loginAnalysis:
                                     Name(id='l_error', ctx=Load()),
                                   ], keywords=[], starargs=None, kwargs=None)
                                 """
+
+                            # This is the two filter case, ex: {{ foo | tojson | safe }}
+                            if hasattr(node, 'args') and hasattr(node.args[0], 'func'):
+                                sub_func = node.args[0]
+                                if hasattr(sub_func, 'args') and hasattr(sub_func.args[0], 'id'):
+                                    v = str(sub_func.args[0].id)
+                                    # total hack, if a variable is named _ that means its doing translations and that can never be user-controlled
+                                    if v == "l__":
+                                        continue
+                                    unsafe_tn_vn_pairs.append( (tn, v))
+                                    """
+                                    Call(func=Name(id='t_1', ctx=Load()), args=[
+                                        Call(func=Name(id='t_2', ctx=Load()), args=[
+                                            Name(id='l_join_data', ctx=Load()),
+                                          ], keywords=[], starargs=None, kwargs=None),
+                                      ], keywords=[], starargs=None, kwargs=None)
+                                    """
 
 
 
@@ -300,16 +387,27 @@ class loginAnalysis:
         # TODO: possible refactor to use a dict the whole time, feels more fitting datatype
         final_unsafe_tn_vn_pairs = dict(final_unsafe_tn_vn_pairs)
 
+        print "\nPotential canidates" + "\t" + repr(final_unsafe_tn_vn_pairs)
 
         # given listen of instances of |safe being used, get variable name and template file name (templates/signup_landing.html) and find all routable funcs that have a render_template() call using that template filename
         # for every render_template() parse the function body looking for the variable name being passed in to render_template
         # Check if that variable is user-controlled ($var = request.args['foo'])
         for path, cb in self.__fn_to_cb.items():
             for node in ast.walk(cb.tree):
+                # This is to handle web-p2 whose "sink" is extend_signup_context and extend_home_context
+                if isinstance(node, ast.Call) and hasattr(node.func, 'id'):
+                    partners_sinks = ["extend_signup_context", "extend_home_context"]
+                    if node.func.id in partners_sinks:
+                        pass
+                        #print 'GOT ONE!!!!!!!!!!!!'
+                        #print repr(node.func.id)
+                        #print astpp.dump(node)
+
+
                 if isinstance(node, ast.Call) and hasattr(node.func, 'attr'):
                     # >1 means its render_template('foo.html', blah=blah_var) at least and not just render_template('foo.html')
                     #if node.func.attr == "render_template" and len(node.args) > 1:
-                    if node.func.attr == "render_template":
+                    if node.func.attr == "render_template" and hasattr(node.args[0], 's'):
                         template_filename_arg = node.args[0].s
 
                         # TODO if a |safe is identified in a base.html its included into other things. We currently miss this. Fixable.
@@ -324,15 +422,33 @@ class loginAnalysis:
                             """
                             if len(node.keywords) > 0:
                                 for k in node.keywords:
-                                    # The dangerous render_template() call is filling a template side variable we know is dangerous, if it is user-controlled on the python side then we have a vuln!
+                                    # The dangerous render_template() call is filling a template-side variable we know is dangerous
+                                    # if it is user-controlled on the python side then we have a vuln!
                                     if k.arg in final_unsafe_tn_vn_pairs[template_filename_arg]:
                                         v = k.value
                                         if isinstance(v, ast.Call):
-                                            if v.func.value.value.value.id == 'flask' and v.func.value.value.attr == 'request' \
-                                            and v.func.value.attr == 'args' and v.func.attr == 'get' and isinstance(v.args[0], ast.Str):
-                                                print 'WIUNNER -> ' + repr(k.arg) + " in " + template_filename_arg
-                                                print repr(v.args[0].s)
+                                            #print repr(dir(v))
+                                            #assert hasattr(v.func.value.value, 'attr')
+                                            #assert hasattr(v.func.value, 'attr')
+                                            #assert hasattr(v.func, 'attr')
+                                            #if isinstance(v.func.value.value.attr, ast.Name):
+                                            #    print v.func.value.value.id
 
+                                            # XXX LEFT OFF - whole goal here is to move beyond matching precisely flask.request.args.get(xxx) to request.args.get(xxx). A better way would be fuzzing matching where we get all parts of the call here and if there is EVER a fucking request with an args behind it consider that good enough and call it a dangerous sink. The precision here isn't totally helpful. 
+
+
+                                            # request.args.get('foo')
+                                            if hasattr(v.func.value.value, 'id'):
+                                                if v.func.value.value.id == 'request' and v.func.value.attr == 'args' \
+                                                        and v.func.attr == 'get' and isinstance(v.args[0], ast.Str):
+                                                    print 'WINNER -> ' + repr(k.arg) + " in " + cb.path + " and " + template_filename_arg
+
+                                            # flask.request.args.get('foo')
+                                            if hasattr(v.func.value.value, "value"):
+                                                if v.func.value.value.value.id == 'flask' and v.func.value.value.attr == 'request' \
+                                                and v.func.value.attr == 'args' and v.func.attr == 'get' and isinstance(v.args[0], ast.Str):
+                                                    print 'WINNER -> ' + repr(k.arg) + " in " + cb.path + " and " + template_filename_arg
+                                                    #print repr(v.args[0].s)
 
                             """
                             At this point we have a few paths
