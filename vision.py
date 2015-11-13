@@ -254,6 +254,9 @@ class loginAnalysis:
             'parse_date' : self.nop_filter,
             'datetime' : self.nop_filter,
             'duration' : self.nop_filter,
+            'decode_list_attr' : self.nop_filter,
+            'get_currency_symbol' : self.nop_filter,
+            'filter_null_or_empty_default' : self.nop_filter,
         }
         env.filters.update(filters_to_add)
 
@@ -364,7 +367,7 @@ class loginAnalysis:
                                     Str(s='collin_error'),
                                   ], keywords=[], starargs=None, kwargs=None))
                                 """ 
-                                if isinstance(node.value, ast.Call):
+                                if isinstance(node.value, ast.Call) and hasattr(node, 'value') and hasattr(node.value.func, 'value'):
                                     if node.value.func.value.id == "context" and node.value.func.attr == "resolve":
                                         if hasattr(node.value, 'args'):
                                             confirmed_dangerous_vn= str(node.value.args[0].s)
@@ -399,6 +402,7 @@ class loginAnalysis:
                     partners_sinks = ["extend_signup_context", "extend_home_context"]
                     if node.func.id in partners_sinks:
                         pass
+                        # TODO... finish this
                         #print 'GOT ONE!!!!!!!!!!!!'
                         #print repr(node.func.id)
                         #print astpp.dump(node)
