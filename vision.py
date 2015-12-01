@@ -5,6 +5,8 @@ import os
 import ast
 import pprint
 import subprocess
+import UserDict
+
 import astpp
 import bulbs
 from bulbs.neo4jserver import Graph, Config, NEO4J_URI
@@ -53,6 +55,32 @@ class funcPrinter(ast.NodeVisitor):
     def visit_FunctionDef(self, node):
         print node.name
         self.generic_visit(node)
+
+
+class NopFilters(UserDict.DictMixin):
+    """A dictionary that only returns a stub filter for Jinja2"""
+
+    def __init__(self):
+        pass
+
+    @staticmethod
+    def _nop_filter(*args, **kwargs):
+        return args[0]
+
+    def has_key(self, key):
+        return True
+
+    def keys(self):
+        return []
+
+    def __getitem__(self, item):
+        return self._nop_filter
+
+    def __setitem__(self, key, value):
+        raise NotImplementedError("stubbed")
+
+    def __delitem__(self, key):
+        raise NotImplementedError("stubbed")
 
 
 class funk:
@@ -237,28 +265,7 @@ class loginAnalysis:
         # Transform templates from html -> py
         tloader = jinja2.FileSystemLoader(template_dir)
         env = jinja2.Environment(loader=tloader)
-
-        # add bogus filters so we can actually parse the damn thing... can be smarter about this
-        filters_to_add = {
-            'tojson' : self.nop_filter,
-            'escapejs': self.nop_filter,
-            'filter_input_type' : self.nop_filter,
-            'filter_input_name' : self.nop_filter,
-            'date' : self.nop_filter,
-            'time' : self.nop_filter,
-            'currency' : self.nop_filter,
-            'json' : self.nop_filter,
-            'filter_attributes' : self.nop_filter,
-            'decode_list_attr' : self.nop_filter,
-            'datetime' : self.nop_filter,
-            'parse_date' : self.nop_filter,
-            'datetime' : self.nop_filter,
-            'duration' : self.nop_filter,
-            'decode_list_attr' : self.nop_filter,
-            'get_currency_symbol' : self.nop_filter,
-            'filter_null_or_empty_default' : self.nop_filter,
-        }
-        env.filters.update(filters_to_add)
+        env.filters = NopFilters()
 
         for tn in env.list_templates(".html"):
             try:
