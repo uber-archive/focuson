@@ -276,6 +276,10 @@ class loginAnalysis:
         # Transform templates from html -> py
         tloader = jinja2.FileSystemLoader(template_dir)
         env = jinja2.Environment(loader=tloader)
+        env.add_extension('jinja2.ext.autoescape')
+        env.add_extension('jinja2.ext.do')
+        # We might need some special support for this monstrosity
+        env.add_extension('jinja2.ext.with_')
         env.filters = NopFilters()
 
         for tn in env.list_templates(".html"):
@@ -287,8 +291,9 @@ class loginAnalysis:
                 parse_tree_of_templates = ast.parse(code)
                 self.__templates[tn] = parse_tree_of_templates
             except jinja2.exceptions.TemplateSyntaxError as e:
-                print 'Could not compile "%s": %s' % (tn, e)
-                # After extensive research: if we hit this then we are not considering this template... find a way to make it ignore missing filters/modules/etc since this will come up a lot
+                print 'Could not compile "%s": %s : %s' % (tn, e.lineno, e)
+                # After extensive research: if we hit this then we are not considering this template...
+                # find a way to make it ignore missing tags / modules since this will come up a lot
                 continue
             except UnicodeDecodeError, e:
                 print "Unicode problems with %s" % tn
