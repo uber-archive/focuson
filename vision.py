@@ -240,14 +240,24 @@ class loginAnalysis:
         """
         pass
 
-
     def find_template_dir(self):
         # web-p2 is web-p2/partners/templates
         # login is login/templates
-        pass
-
-    def nop_filter(s):
-        return s
+        # TODO: look for invocations of `jinja2.Environment` and see if
+        # we can pull the template directory / package from there? Should work
+        # for most.
+        template_dirs = set()
+        for root, subdir, files in os.walk(self.__base_file_dir):
+            for fname in files:
+                fpath = os.path.join(root, fname)
+                if fname.endswith(".html"):
+                    with open(fpath, "rb") as f:
+                        # Hmm, smells like a jinja template!
+                        if b"{%" in f.read():
+                            template_dirs.add(root)
+        # If there are multiple template directories in a repo we might need
+        # repo-specific overrides.
+        return None if not template_dirs else os.path.commonprefix(template_dirs)
 
     def rule_find_incredibly_simple_jinja_xss(self):
         assert self.__base_file_dir
@@ -257,10 +267,11 @@ class loginAnalysis:
         unsafe_tn_vn_pairs = []
 
         # Get template dir
-        template_dir = self.__base_file_dir + os.sep + "templates"
+        template_dir = self.find_template_dir()
+        # Some repos don't even use Jinja
+        if not template_dir:
+            return
         print 'template dir....: ' + template_dir
-        # TODO this needs to really sniff around for any .html and evaluate it if its a jinja template, not just look in one dumb static directory
-
 
         # Transform templates from html -> py
         tloader = jinja2.FileSystemLoader(template_dir)
