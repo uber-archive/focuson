@@ -7,12 +7,13 @@ import pprint
 import subprocess
 import UserDict
 
+import codegen
 import astpp
-import bulbs
-from bulbs.neo4jserver import Graph, Config, NEO4J_URI
-from bulbs.model import Node, Relationship
-from bulbs.property import String, Integer, DateTime, Null
-from bulbs.utils import current_datetime
+#import bulbs
+#from bulbs.neo4jserver import Graph, Config, NEO4J_URI
+#from bulbs.model import Node, Relationship
+#from bulbs.property import String, Integer, DateTime, Null
+#from bulbs.utils import current_datetime
 import jinja2
 
 
@@ -259,6 +260,8 @@ class loginAnalysis:
         # repo-specific overrides.
         return None if not template_dirs else os.path.commonprefix(template_dirs)
 
+
+
     def rule_find_incredibly_simple_jinja_xss(self):
         assert self.__base_file_dir
         # There are 5-10 more complex variations needed to cover our bases here, this is the very first and simple one I can do without "real" dataflow analysis.
@@ -299,7 +302,7 @@ class loginAnalysis:
                 print "Unicode problems with %s" % tn
                 continue
 
-        print "Processing %d py files and %d / %d templates..." % (len(self.__fn_to_cb.keys()), len(self.__templates.keys()), len(env.list_templates(".html")))
+        print "Processing %d py files and %d / %d templates..." % (len(self.__fn_to_cb.keys()), len(self.__templates.keys()), len(list(env.list_templates(".html"))))
 
         # Scan/visit the py for  t_1 = environment.filters['safe']
         for tn, tree in self.__templates.items():
@@ -376,8 +379,10 @@ class loginAnalysis:
         for (tn, dangerous_var_name) in unsafe_tn_vn_pairs:
             confirmed_dangerous_var_names = []
             unconfirmed_dangerous_var_names = []
+
             #print tn
             #print "DANGER VARIABLE -> " + dangerous_var_name
+
             for node in ast.walk(self.__templates[tn]):
                 if isinstance(node, ast.Assign):
                     if hasattr(node, "targets"):
@@ -394,6 +399,7 @@ class loginAnalysis:
                                     if node.value.func.value.id == "context" and node.value.func.attr == "resolve":
                                         if hasattr(node.value, 'args'):
                                             confirmed_dangerous_vn= str(node.value.args[0].s)
+                                            #print "DEEP" + confirmed_dangerous_vn
                                             confirmed_dangerous_var_names.append( confirmed_dangerous_vn)
                                             continue
 
@@ -410,37 +416,96 @@ class loginAnalysis:
         unsafe_template_names = [ tn for (tn, v) in final_unsafe_tn_vn_pairs] 
         unsafe_template_side_variable_names = [v[0] for (tn, v) in final_unsafe_tn_vn_pairs]
 
+
         # TODO: possible refactor to use a dict the whole time, feels more fitting datatype
         final_unsafe_tn_vn_pairs = dict(final_unsafe_tn_vn_pairs)
 
-        print "\nPotential canidates" + "\t" + repr(final_unsafe_tn_vn_pairs)
+
+        # The ones we parse from the ast come in the form 'signup/foo.html'. Remove leading path info so they can potentially match
+        template_string = os.sep + "templates" + os.sep
+        really_final_unsafe_tn_vn_pairs = {}
+        for tn,v in final_unsafe_tn_vn_pairs.items():
+            if tn.startswith("/"):
+                new_tn = tn[1:]
+                really_final_unsafe_tn_vn_pairs[new_tn] = v
+            else:
+                really_final_unsafe_tn_vn_pairs[tn] = v
+        final_unsafe_tn_vn_pairs = really_final_unsafe_tn_vn_pairs
+ 
+        print "\ntemplates that use |safe:\n"
+        for k,v in final_unsafe_tn_vn_pairs.items():
+            print k, v
+
 
         # given listen of instances of |safe being used, get variable name and template file name (templates/signup_landing.html) and find all routable funcs that have a render_template() call using that template filename
         # for every render_template() parse the function body looking for the variable name being passed in to render_template
         # Check if that variable is user-controlled ($var = request.args['foo'])
         for path, cb in self.__fn_to_cb.items():
             for node in ast.walk(cb.tree):
-                # This is to handle web-p2 whose "sink" is extend_signup_context and extend_home_context
+
+                # Handle web-p2 @templated('foo.html') case
+                if isinstance(node, ast.FunctionDef):
+                    if hasattr(node, "decorator_list"):
+                        if len(node.decorator_list) > 0:
+                            for deco in node.decorator_list:
+                                if isinstance(deco, ast.Call):
+                                    if hasattr(deco.func, "id"):
+                                        if deco.func.id == 'templated':
+                                            if hasattr(deco, "args"):
+                                                if len(deco.args) > 0:
+                                                    # We now have every instance of the @templated deco, now check to see if any are in our unsafe list
+                                                    template_filename_arg = deco.args[0].s
+                                                    if template_filename_arg.startswith("/"):
+                                                        template_filename_arg = template_filename_arg[1:]
+
+                                                    if template_filename_arg in final_unsafe_tn_vn_pairs.keys():
+                                                        try:
+                                                            source = codegen.to_source(node)
+                                                            print "UNSAFE -> templatename: %s, unsafe var: %s\n code:  %s\n" % (template_filename_arg, final_unsafe_tn_vn_pairs[template_filename_arg], source)
+                                                        except:
+                                                            print "UNSAFE -> templatename: %s, unsafe var: %s\n func name: %s\n" % (template_filename_arg, final_unsafe_tn_vn_pairs[template_filename_arg], node.name)
+
+                # handles web-p2 render_template calls, should be combined with freecandy/login render_template handling code below...
                 if isinstance(node, ast.Call) and hasattr(node.func, 'id'):
-                    partners_sinks = ["extend_signup_context", "extend_home_context"]
-                    if node.func.id in partners_sinks:
-                        pass
-                        # TODO... finish this
-                        #print 'GOT ONE!!!!!!!!!!!!'
-                        #print repr(node.func.id)
-                        #print astpp.dump(node)
+                    if node.func.id == 'render_template' and hasattr(node, "args") and hasattr(node, "keywords"):
+                        if len(node.keywords) > 0 and hasattr(node.args[0], 's'):
+                            template_filename_arg = node.args[0].s
+                            if final_unsafe_tn_vn_pairs.has_key(template_filename_arg):
+                                for k in node.keywords:
+                                    if k.arg in final_unsafe_tn_vn_pairs[template_filename_arg]:
+                                        try:
+                                            source = codegen.to_source(node)
+                                            print "UNSAFE -> templatename: %s, unsafe var: %s\n code:  %s\n" % (template_filename_arg, final_unsafe_tn_vn_pairs[template_filename_arg], source)
+                                        except:
+                                            print "UNSAFE -> templatename: %s, unsafe var: %s\n func name: %s\n" % (template_filename_arg, final_unsafe_tn_vn_pairs[template_filename_arg], node.name)
+
+ 
+
+                # Handle free-candys smart_template()
+                """
+                if isinstance(node, ast.Call) and hasattr(node.func, 'id'):
+                    if node.func.id == 'smart_template':
+                        print path
+                        print astpp.dump(node.func)
+
+                """
+                # finish this later ^
+
+
 
 
                 if isinstance(node, ast.Call) and hasattr(node.func, 'attr'):
                     # >1 means its render_template('foo.html', blah=blah_var) at least and not just render_template('foo.html')
                     #if node.func.attr == "render_template" and len(node.args) > 1:
-                    if node.func.attr == "render_template" and hasattr(node.args[0], 's'):
+                    if node.func.attr == "render_template" and len(node.args) > 0 and hasattr(node.args[0], 's'):
                         template_filename_arg = node.args[0].s
 
                         # TODO if a |safe is identified in a base.html its included into other things. We currently miss this. Fixable.
                         # TODO #2 - need to be more generic about paths, someone might do render_template('templates/foo.html') or render_template('foo.html') with the templates/ dir assumed
                         
                         # A render_template instance using a a template we know has an unsafe variable
+                        print template_filename_arg
+                        print repr(final_unsafe_tn_vn_pairs.keys())
                         if template_filename_arg in final_unsafe_tn_vn_pairs.keys():
                             """
                             This handles the following case
