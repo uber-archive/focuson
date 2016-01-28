@@ -25,6 +25,14 @@ import jinja2
 
 
 """
+
+TODO:
+    * Enhance jinja2 template parsing code to not only look at |safe but any variable that goes into a <script> block
+
+
+
+
+
 Rule families
 
 1. Ast rules. Simple as they operate upon the AST

@@ -1,0 +1,9 @@
+sample app should be a main.py, importing jinja and flask, having a few routes, the body of each route should call out to another module forcing intra-functional dataflow. That other module should exist in this dir/package/module and should be parsed
+
+final goal here is the program broken into a cfg with basic blocks, each basic block containing the assignments, then we make a gen-kill flow diagram to determine liveness
+
+all this should be in neo4j and each edge into a block is flows-in and flows-out
+
+break upon each control flow altering thing, if, else, raise, while, true, false etc
+
+
