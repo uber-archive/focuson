@@ -9,7 +9,7 @@ import UserDict
 
 import codegen
 import astpp
-#import bulbs
+import bulbs
 #from bulbs.neo4jserver import Graph, Config, NEO4J_URI
 #from bulbs.model import Node, Relationship
 #from bulbs.property import String, Integer, DateTime, Null
@@ -25,6 +25,14 @@ import jinja2
 
 
 """
+TODO:
+    * Get tainted source from app.route() method
+    * Break up giant jinja2 xss rule into a big sink rule that gets interesting variables from the jinja2 but is otherwise just like the eval() test
+    * add def/use for variables that are tainted but then redefined and safe
+    * Handle binOp cases where x = TAINTED; x = x + "some string"; eval(x)
+    * Handle eval("foo bar baz %s" % x) case, x = tainted
+    * Look through old bugs to find actual good sinks, json.dumps()? requests? urllib?
+
 
 TODO:
     * Enhance jinja2 template parsing code to not only look at |safe but any variable that goes into a <script> block
@@ -65,6 +73,17 @@ class funcPrinter(ast.NodeVisitor):
         print node.name
         self.generic_visit(node)
 
+class DangerDict:
+    def __init__(self, name, key):
+        # name of the dict iself
+        self.name = name
+        # Name of key whose value is tainted
+        self.key = key
+    def __str__(self):
+        return "%s['%s']" % (self.name, self.key)
+    def __repr__(self):
+        return "%s['%s']" % (self.name, self.key)
+
 
 class NopFilters(UserDict.DictMixin):
     """A dictionary that only returns a stub filter for Jinja2"""
@@ -91,8 +110,11 @@ class NopFilters(UserDict.DictMixin):
     def __delitem__(self, key):
         raise NotImplementedError("stubbed")
 
-
 class funk:
+    """
+    represents the function as its parsed by the ast module
+    Eventually we want repo and committer (git blame) specific info here to make informed decisions
+    """
     def __init__(self, ast_tree=None):
         self.tree = ast_tree
         self.decos = []
@@ -114,6 +136,8 @@ class loginAnalysis:
         # filename : code bundle
         # codebundle = { full path, list of functions, git history? } 
         self.__fn_to_cb = {}
+
+        self.__tainted_variables = []
 
     def injest_dir(self, rootdir):
         if not os.path.isdir(rootdir):
@@ -234,19 +258,172 @@ class loginAnalysis:
         """
 
 
+    def is_dangerous_source_app_route(self, node):
+        # This needs to take a func def and look at app.route calls then map to args of function? Im not even sure its a bit hairy
+        """
+        2. querystring args passed as argument to function via app.route(), ex:
+            @app.route('/survey/<survey_id>', methods=['GET'])
+            def query_survey(survey_id):
+        """
+        pass
+
+    def is_dangerous_source_assignment(self, node):
+        #Two families of dangerous stuff
+        #1. Anything from request.*
+        if isinstance(node, ast.Call):
+            #print astpp.dump(node)
+
+            # Handles foo = request.*
+            if hasattr(node.func, "value") and hasattr(node.func.value, "value") and hasattr(node.func.value.value, 'id'):
+                if node.func.value.value.id == 'request':
+                    return True
+
+            # handles: host = flask.request.headers.get('Host')
+            if hasattr(node.func, "value") and hasattr(node.func.value, "value") and hasattr(node.func.value.value, "value") and hasattr(node.func.value.value.value, 'id') and hasattr(node.func.value.value, 'attr'):
+                if node.func.value.value.value.id == 'flask' and node.func.value.value.attr == 'request':
+                    return True
+        return False
+
+
+
+    def get_initial_tained_variables_inside_function(self, func_ast):
+        tainted_variables = []
+        for node in ast.walk(func_ast):
+            if isinstance(node, ast.Assign):
+                #print astpp.dump(node)
+                if not hasattr(node.targets[0], "id"):
+                    continue
+                (lhs, rhs) = (node.targets[0].id, node.value)
+                if self.is_dangerous_source_assignment(rhs):
+                    tainted_variables.append(lhs)
+
+        return tainted_variables
+
+    # This could be so much more elegant and recrusive and nice. 
+    def propagate_taint(self, initial_tainted_variables, total_assigns):
+        """
+        Look through every assignment (within a function body) looking for assignments *from* variables we know are tainted. This set is seeded by the initial_tainted_variables list. 
+        If we see an assignment from a known tainted right hand side variable to a lhs variable, make that lhs variable also tainted. 
+
+        I haven't tested but this assumes the ordering of assignments is from start -> end of fun in the list we are passed in
+
+        Instead of bare variable names ("a", "a2") this should really be module::class::func::variable name which will help later with analysis across function calls
+
+        This code completely ignores if a variable we mark as tainted is later redefined to something else which should nullify the taint, to do this we need to do reaching definitions here
+        https://en.wikipedia.org/wiki/Static_single_assignment_form
+        """
+        # Reset ugly hacky global...
+        self.__tainted_variables = initial_tainted_variables
+
+        for node in total_assigns:
+           #print astpp.dump(assign) 
+
+            if not hasattr(node.targets[0], "id"):
+                continue
+ 
+            (lhs, rhs) = (node.targets[0].id, node.value)
+            # a = var_tainted case
+            if isinstance(rhs, ast.Name):
+                #print lhs, rhs.id
+                if rhs.id in self.__tainted_variables:
+                    self.__tainted_variables.append(lhs)
+
+            # a = {'foo' : var_tainted, 'bar' : blah} case
+            if isinstance(rhs, ast.Dict):
+                k = rhs.keys
+                v = rhs.values
+                for v in rhs.values:
+                    if isinstance(v, ast.Name):
+                        if v.id in self.__tainted_variables:
+                            # We found a tainted variable as the value in a dict definition, record the dangerous dict name and key which points to this value
+                            dict_name = lhs
+                            i = rhs.values.index(v)
+                            key_name = rhs.keys[i].s
+                            #print str(i), key_name, dict_name
+                            self.__tainted_variables.append(DangerDict(dict_name, key_name))
+
+        return self.__tainted_variables
+
+
+    def find_tainted_flows(self):
+        # For each function determine all the tainted variabls inside it and if any end up in a dangerous sink
+        for fn, cb in self.__fn_to_cb.items():
+            for f in cb.funcs:
+                # foreach function, get initial set of x = request.args('foo') 
+                # then loop through assignments to follow assignment of x to any other variables
+                initial_tainted_vars = self.get_initial_tained_variables_inside_function(f.tree)
+                #print initial_tainted_vars
+
+                total_assigns = [x for x in f.tree.body if type(x) == ast.Assign]
+                all_tainted_vars = self.propagate_taint(initial_tainted_vars, total_assigns)
+                if len(all_tainted_vars) > 0:
+                    print '%s: in %s -> '  % (fn, f.tree.name) + repr(all_tainted_vars)
+
+                # We now have all variables inside this function that are tainted. See if any are used as arguments to dangerous sinks
+                issues = self.check_dangerous_sinks(f.tree, all_tainted_vars)
+
+                #print astpp.dump(f.tree)
+
+
+    def is_tainted(self, var, all_tainted_vars):
+        # Take a variable and look it up in the tainted variables list to see if it is dangerous
+        # This exists to handle the different variable assignment forms,
+        # a = b is an ast.Assign, dicts and lists are different
+        # var should always be just a string, a variable name to check
+
+        # Improvement, keep seperate lists of each type of tainted var, one for ast.Name, one for Subscript etc... will speed up minorly I imagine
+
+
+        dangerous_dicts = [x for x in all_tainted_vars if isinstance(x, DangerDict)]
+
+        # Simplist case, a = tainted; eval(a)
+        if isinstance(var, ast.Name):
+            if var in all_tainted_vars:
+                return True
+
+        # Dict subscript case, a = tainted, d = {"keyname" : a}; eval(d['keyname'])
+        if isinstance(var, ast.Subscript):
+            usage_name_of_dict = var.value.id
+            usage_name_of_key = var.slice.value.s
+            for dd in dangerous_dicts:
+                if dd.name == usage_name_of_dict and dd.key == usage_name_of_key:
+                    return True
+
+        # Dict .get() case: a = tainted, d = {"keyname" : a}; eval(d.get("keyname"])
+        if isinstance(var, ast.Call):
+            if var.func.attr == "get":
+                usage_name_of_dict = var.func.value.id
+            if isinstance(var.args[0], ast.Str):
+                usage_name_of_key = var.args[0].s
+            for dd in dangerous_dicts:
+                if dd.name == usage_name_of_dict and dd.key == usage_name_of_key:
+                    return True
+
+
+    def check_dangerous_sinks(self, tree, all_tainted_vars):
+    
+        #request = urllib2.Request( url="{}/{}".format(clay.config.get('login.host'), route.lstrip("/")), data=data, headers=headers)
+        dangerous_sinks = ["eval", "render_template", "mysql_query"]
+
+        # Find all instances of dangerous sinks
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Call):
+                if hasattr(n.func, "id"):
+                    func_name = n.func.id
+                    if func_name in dangerous_sinks:
+                        args = n.args
+                        for a in args:
+                            if self.is_tainted(a, all_tainted_vars):
+                                print 'FOUND A BVUGGGG -> variable flows to %s' % (func_name)
+                      
+    def build_cfg(self, ast_chunk):
+        pass
+
     def build_dataflow_graph(self):
         pass
         # Big time.
 
     def build_list_of_uc_inputs(self):
-        """
-        Within a given procedure/function get user-controlled inputs. Examples:
-        1. foo = flask.request.args.get('foo')
-        2. foo = request.args.get('foo')
-        3. foo = request.args['foo']
-        4.  @app.route('/survey/<survey_id>', methods=['GET'])
-            def query_survey(survey_id):
-        """
         pass
 
     def find_template_dir(self):
@@ -589,7 +766,8 @@ def main():
     #la.rule_no_csrf_protection()
     #la.get_all_routable_funcs()
     #la.rule_routable_but_no_service_auth()
-    la.rule_find_incredibly_simple_jinja_xss()
+    #la.rule_find_incredibly_simple_jinja_xss()
+    la.find_tainted_flows()
 
 
 if __name__ == "__main__":
