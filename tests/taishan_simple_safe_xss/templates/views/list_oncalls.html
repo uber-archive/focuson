@@ -1,0 +1,28 @@
+{% extends "layout.html" %}
+
+{% block body %}
+
+  <div class="page-header">
+    <h2>Oncalls</h2>
+  </div>
+    {{  oncalls_str|safe }}
+
+{#   {{ from json2html import * }} {{json2html.convert(json = oncalls)  }}#}
+{#  <table class="table table-striped">#}
+{#    <tr>#}
+{#      <th>Oncall Rotation</th>#}
+{#      <th>Name</th>#}
+{#      <th>Email</th>#}
+{#      <th>Phone</th>#}
+{#    </tr>#}
+{#    {% for oncall in data %}#}
+{#      <tr>#}
+{#        <td>{{ oncall.name }}</td>#}
+{#        <td>{{ oncall.person.user.name }}</td>#}
+{#        <td>{{ oncall.person.user.email }}</td>#}
+{##}
+{#      </tr>#}
+{#    {% endfor %}#}
+{#  </table>#}
+
+{% endblock %}

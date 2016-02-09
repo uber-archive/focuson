@@ -1,3 +1,10 @@
+Focusin - A python static analysis tool to help find security flaws
+
+
+http://simpsons.wikia.com/wiki/Focusyn
+
+
+
 Enter venv: source venv/bin/activate
 
 

@@ -1,0 +1,24 @@
+{% block js %}
+  {{ super() }}
+  <script>
+    var osFamily = "{{ os_family }}";
+
+    window.utag_data = {
+      eventType: 'landed',
+      eventName: 'web-p2.open-app',
+      os_family: osFamily,
+    };
+
+    if (osFamily === 'iOS') {
+      window.location = "{{ iphone_deep_link|safe }}";
+      setTimeout(function() {
+        window.location = "{{ iphone_fallback_link|safe }}";
+      }, 25);
+    } else if (osFamily === 'Android') {
+      window.location = "{{ android_deep_link|safe }}";
+      setTimeout(function() {
+        window.location = "{{ android_fallback_link|safe }}";
+      }, 25);
+    }
+  </script>
+{% endblock js %}

@@ -1,0 +1,22 @@
+{% extends "emails/layout.html" %}
+
+{% block body %}
+  <h1>New Taishan Experiment</h1>
+  <p>A new experiment has been created for <a href="{{ base_url }}/experiment/{{ parent.id }}">{{ parent.name }}</a>
+    at {{ exp.created_at }} UTC,
+  <a href="{{ base_url }}/experiment/{{ exp.id }}">click here</a> for details.</p>
+
+  {% if auto_send %}
+      <p>Your messages were sent out, since auto-send was enabled.</p>
+  {% else %}
+      <p>Your messages were NOT sent out, since auto-send was not enabled.</p>
+  {% endif %}
+
+  {% if need_ftp %}
+    {% if ftp_success %}
+      <p>We have also uploaded message data to FTP successfully.</p>
+    {% else %}
+      <p>There was some error when uploading message data to ftp, please upload them manually.</p>
+    {% endif %}
+  {% endif %}
+{% endblock %}

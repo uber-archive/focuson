@@ -97,12 +97,15 @@ def get_auth_type_for_routes(views_dir, routes_list):
 
                                             if isinstance(auth_call, ast.Call):
                                                 #print astpp.dump(dec.keywords[0])
-                                                if not auth_call.func.value.id == "api_auth":
-                                                    print 'uggggggggggggggggggggggggggh something else weird is wrong...............'
-                                                    continue
-                                                auth_type = auth_call.func.attr
-                                                #routes_to_auth_type[r] = auth_type
-                                                routes_to_auth_type[r] = (auth_type, potential_fn_for_a_route, node.lineno)
+                                                #print 'got a call..........'
+                                                #print astpp.dump(dec.keywords[0])
+                                                if hasattr(auth_call, "func") and hasattr(auth_call.func, "value") and hasattr(auth_call.func, "attr"):
+                                                    if not auth_call.func.value.id == "api_auth":
+                                                        print 'uggggggggggggggggggggggggggh something else weird is wrong...............'
+                                                        continue
+                                                    auth_type = auth_call.func.attr
+                                                    #routes_to_auth_type[r] = auth_type
+                                                    routes_to_auth_type[r] = (auth_type, potential_fn_for_a_route, node.lineno)
     return routes_to_auth_type
 
 
@@ -152,7 +155,7 @@ def main():
     route_path = "/Users/collin/src/api/Uber/uber/routing.py"
     routes = get_routes(route_path)
     views_dir = target_dir + os.sep + "views"
-    #print "%d routes." % len(routes)
+    print "%d routes." % len(routes)
 
     route_to_auth_type = get_auth_type_for_routes(views_dir, routes)
 
