@@ -612,7 +612,7 @@ class loginAnalysis:
 
                 ts_vars = unsafe_templateside_info[template_filename_arg]
                 if self.manual_mode:
-                    print '%s:%d dangerous render_template() via %s' % (fn, node.lineno, repr(ts_vars))
+                    print '%s +%d dangerous render_template() via %s' % (fn, node.lineno, repr(ts_vars))
 
 
                 # arguments like: render_template("foo.html", {a=b, c=d})
@@ -684,7 +684,7 @@ class loginAnalysis:
 
         # If the arguments to templated (the return value, as a dict) contained tainted vars...
         if len(templated_danger_vars) > 0:
-            print "%s:%d templated() vars: %s" % (source_filename, n.lineno, repr(templated_danger_vars))
+            print "%s +%d templated() vars: %s" % (source_filename, n.lineno, repr(templated_danger_vars))
             #print repr(unsafe_tn_to_varnames.keys())
             for node in ast.walk(tree):
                 if isinstance(node, ast.Return):
