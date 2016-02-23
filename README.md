@@ -5,7 +5,6 @@ http://simpsons.wikia.com/wiki/Focusyn
 
 Goal: Finding security flaws in software is hard work - the goal of focusin is to give you an educated selection of areas in a python codebase to start looking. For microservices or websites a security audit would naturally focus on a subset of areas:
 
-```
 1. All functions that can be hit from the internet. ex: have app.route() decorators 
 2. All of those internet-routable functions that also have any user input. ex: have an assignment like ```foo = request.args.get("foo") ```
 3. All of the set of functions that pass #1 and #2 that also have a call to a function that renders html. ex: ``` flask.render_template() ```
