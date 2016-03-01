@@ -1,29 +1,45 @@
 #!/usr/bin/python
+from __future__ import print_function
 
-from jinja2 import Environment, meta
-import jinja2
+import ast
 import sys
 import os
-import ast
-import pprint
-import subprocess
-from jinja2.loaders import ModuleLoader
-from jinja2.exceptions import TemplateSyntaxError
-import astpp
+import os.path
+from collections import defaultdict
 
+STR_AUTH_MAP = {
+    "token": "token_wall",
+    "token_allow_banned": "token_wall_allow_banned",
+    "admin": "admin_wall",
+    "admin_not_restricted": "admin_not_restricted_wall",
+    "super_admin": "super_admin_wall",
+    "no_auth_required": "insecure_wall",
+    "GAPING_SECURITY_HOLE": "insecure_wall",
+    "admin_and_dispatch_tag": "admin_and_dispatch_tag_wall",
+    "gift_card": "gift_card_wall",
+    "twilio_wall": "twilio_wall",
+    "trip_rate_wall": "trip_rate_wall",
+}
 
 
 def usage():
     if len(sys.argv) < 2:
-        print "Usage: %s <dir to scan>" % sys.argv[0]
+        print("Usage: %s <dir to scan>" % sys.argv[0], file=sys.stderr)
         sys.exit(1)
     target_dir = sys.argv[1]
-    template_dir = target_dir + os.sep + "templates"
+    template_dir = os.path.join(target_dir, "templates")
     if not os.path.isdir(target_dir) or not os.path.isdir(template_dir):
-        print "%s needs to be a directory under which there will be a templates/ directory" % target_dir
+        print("%s needs to be a directory under which "
+              "there will be a templates/ directory" % target_dir, file=sys.stderr)
         sys.exit(1)
     return target_dir
 
+
+def find_decorated_funcs(tree):
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            if hasattr(node, "decorator_list"):
+                yield node
 
 
 def get_auth_type_for_routes(views_dir, routes_list):
@@ -33,178 +49,189 @@ def get_auth_type_for_routes(views_dir, routes_list):
     for each matching route -> file::func return the parse tree for that func
     """
     routes_to_auth_type = {}
-    for r in routes_list:
-        fn = r.split(".")
-        assert(len(fn) == 2)
-        fn = fn[0]
-        potential_fn_for_a_route = views_dir + os.sep + fn + ".py"
-        # XXX this is wasteful of memory, if we have 100 routes in one .py we will read/parse and store that one file 100 times
-        if os.path.isfile(potential_fn_for_a_route):
-            file_contents = file(potential_fn_for_a_route).read()
-            tree = ast.parse(file_contents)
-            for node in ast.walk(tree):
-                if isinstance(node, ast.FunctionDef):
-                    if hasattr(node, "decorator_list"):
-                        for dec in node.decorator_list:
-                            if isinstance(dec, ast.Call) and hasattr(dec, "func"):
-                                if isinstance(dec.func, ast.Name) and hasattr(dec.func, "id"):
-                                    name_of_deco = dec.func.id
-                                    if name_of_deco == "UberAPI":
-                                        """
-                                        Few different forms here but one looks like this:
-                                        Call(func=Name(id='UberAPI', ctx=Load()), args=[], keywords=[
-                                            keyword(arg='auth', value=Call(func=Attribute(value=Name(id='api_auth', ctx=Load()), attr='service_wall_factory', ctx=Load()), args=[
-                                                Str(s='dispatch'),
-                                                Str(s='hailstorm'),
-                                              ], keywords=[], starargs=None, kwargs=None)),
-                                        """
-                                        if hasattr(dec, "keywords"):
-                                            if not len(dec.keywords) > 0:
-                                                #print 'ugggggggggggggggggggggh some different auth deco pattern.... look into this later..........\n'
-                                                #print astpp.dump(dec)
-                                                """
-                                                Call(func=Name(id='UberAPI', ctx=Load()), args=[
-                                                    Call(func=Attribute(value=Name(id='api_auth', ctx=Load()), attr='admin_or_service', ctx=Load()), args=[
-                                                        Str(s='ubill'),
-                                                        Str(s='unvaulter'),
-                                                      ], keywords=[], starargs=None, kwargs=None),
-                                                  ], keywords=[], starargs=None, kwargs=None)
+    files = {}
+    # Collect all the files that contain routable functions
+    for route_name in routes_list:
+        # Lop off the view name so we just have the path
+        modules_split = route_name.split(".")
+        assert(len(modules_split) > 1)
+        modules_split = modules_split[:-1]
 
+        files[os.path.join(views_dir, *modules_split) + ".py"] = modules_split
 
-                                                @UberAPI(auth=api_auth.admin_not_restricted_or_service(
-                                                    'lucy',
-                                                ), use_json_dt=False)
-                                                """
-
-                                                #auth_type = dec.func.args[0].func.attr
-                                                #routes_to_auth_type[r] = auth_type
-                                                # TODO this doesn't really matter so we can ignore for now...
-                                                continue
-
-
-                                            if not dec.keywords[0].arg == "auth":
-                                                #print "ugggggggggggggggggggggggggh some other different error........ ignoring for now.........\n"
-                                                #print astpp.dump(dec)
-                                                continue
-
-                                            assert(dec.keywords[0].arg == "auth")
-                                            auth_call = dec.keywords[0].value
-                                            if isinstance(auth_call, ast.Str):
-                                                auth_type = auth_call.s
-
-                                                # Auth type, file path, line number (of function def) (at, fp, lineno) 
-                                                routes_to_auth_type[r] = (auth_type, potential_fn_for_a_route, node.lineno)
-
-                                            if isinstance(auth_call, ast.Call):
-                                                #print astpp.dump(dec.keywords[0])
-                                                #print 'got a call..........'
-                                                #print astpp.dump(dec.keywords[0])
-                                                if hasattr(auth_call, "func") and hasattr(auth_call.func, "value") and hasattr(auth_call.func, "attr"):
-                                                    if not auth_call.func.value.id == "api_auth":
-                                                        print 'uggggggggggggggggggggggggggh something else weird is wrong...............'
-                                                        continue
-                                                    auth_type = auth_call.func.attr
-                                                    #routes_to_auth_type[r] = auth_type
-                                                    routes_to_auth_type[r] = (auth_type, potential_fn_for_a_route, node.lineno)
+    for path, modules_split in files.items():
+        if not os.path.isfile(path):
+            raise Exception("WTF? %s isn't a valid view path" % path)
+        with file(path) as f:
+            file_contents = f.read()
+        tree = ast.parse(file_contents)
+        for node in find_decorated_funcs(tree):
+            for dec in node.decorator_list:
+                full_node_name = ".".join(modules_split + [node.name])
+                # Not a routable function? Don't care.
+                if full_node_name not in routes_list:
+                    continue
+                auth_type = sniff_decorator_for_access(dec)
+                if not auth_type:
+                    continue
+                # Auth type, file path, line number (of function def) (at, fp, lineno)
+                routes_to_auth_type[full_node_name] = (auth_type, path, node.lineno)
+                break
     return routes_to_auth_type
 
 
-def is_call_an_add_route(call):
-    if hasattr(call, "func"):
-        func = call.func
-        if hasattr(func, "id"):
-            if func.id == "add_route":
-                return True
+def is_uberapi_decorator(dec):
+    if isinstance(dec, ast.Call) and hasattr(dec, "func"):
+        if isinstance(dec.func, ast.Name) and hasattr(dec.func, "id"):
+            """
+                Few different forms here but one looks like this:
+                Call(func=Name(id='UberAPI', ctx=Load()), args=[], keywords=[
+                    keyword(arg='auth', value=Call(func=Attribute(value=Name(id='api_auth', ctx=Load()), attr='service_wall_factory', ctx=Load()), args=[
+                        Str(s='dispatch'),
+                        Str(s='hailstorm'),
+                      ], keywords=[], starargs=None, kwargs=None)),
+            """
+            return dec.func.id == "UberAPI" and hasattr(dec, "keywords")
     return False
 
-# ugh a global.... 
-routable_func_names = []
 
-class route_visitor(ast.NodeVisitor):
-    global routable_func_names
+def sniff_decorator_for_access(dec):
+    if not is_uberapi_decorator(dec):
+        return None
+    if not dec.keywords:
+        # print 'some different auth deco pattern\n'
+        # print astpp.dump(dec)
+        """
+        Call(func=Name(id='UberAPI', ctx=Load()), args=[
+            Call(func=Attribute(value=Name(id='api_auth', ctx=Load()), attr='admin_or_service', ctx=Load()), args=[
+                Str(s='ubill'),
+                Str(s='unvaulter'),
+              ], keywords=[], starargs=None, kwargs=None),
+          ], keywords=[], starargs=None, kwargs=None)
+
+
+        @UberAPI(auth=api_auth.admin_not_restricted_or_service(
+            'lucy',
+        ), use_json_dt=False)
+        """
+
+        # auth_type = dec.func.args[0].func.attr
+        # routes_to_auth_type[r] = auth_type
+        # TODO this doesn't really matter so we can ignore for now...
+        return None
+
+    auth_kwargs = filter(lambda x: x.arg == "auth", dec.keywords)
+    if not auth_kwargs:
+        # print 'some different auth deco pattern\n'
+        # print astpp.dump(dec)
+        return None
+
+    auth_call = auth_kwargs[0].value
+    if isinstance(auth_call, ast.Str):
+        return STR_AUTH_MAP.get(auth_call.s, auth_call.s)
+
+    elif isinstance(auth_call, ast.Call):
+        # print astpp.dump(dec.keywords[0])
+        # print 'got a call..........'
+        # print astpp.dump(dec.keywords[0])
+
+        if hasattr(auth_call, "func"):
+            if all(hasattr(auth_call.func, x) for x in {"value", "attr"}):
+                if not auth_call.func.value.id == "api_auth":
+                    print('something else weird is wrong...............', file=sys.stderr)
+                    return "unknown"
+                return auth_call.func.attr
+            if hasattr(auth_call.func, "id"):
+                return auth_call.func.id
+
+    elif isinstance(auth_call, (ast.Attribute, ast.Name, ast.Call)):
+        # custom auth wall? IDKLOL.
+        # @UberAPI(auth=_zendesk_user_wall)
+        # def index(request):
+        return get_fully_qualified_func_name(auth_call).replace("api_auth.", "")
+    # return "unknown" for crap like:
+    # @UberAPI(auth=api_auth.user_wall_factory(
+    #    'payment_profile',
+    #    object_getter=_pp_object_getter(rollout_setting_name='pp_deposit_request'))
+    #    if not config.get('money.payment.airtel_money.skip_check_bonus_auth', True)
+    #    else "no_auth_required")
+    # It's hard to determine statically which auth wall it'd use.
+    return "unknown"
+
+
+def get_fully_qualified_func_name(v):
+    name_parts = []
+    while hasattr(v, "attr"):
+        name_parts.append(v.attr)
+        v = v.value
+    name_parts.append(v.id)
+    return ".".join(reversed(name_parts))
+
+
+class RouteVisitor(ast.NodeVisitor):
+    def __init__(self):
+        self.routable_func_names = []
+
+    @staticmethod
+    def is_add_route_call(call):
+        if hasattr(call, "func"):
+            func = call.func
+            if hasattr(func, "id"):
+                return func.id == "add_route"
+        return False
+
     def visit_Expr(self, node):
-        expr = node
-        if hasattr(expr,'value'):
-            if isinstance(expr.value, ast.Call):
-                call = expr.value
-                if is_call_an_add_route(call):
-                    for kw in call.keywords:
-                        k = kw.arg
-                        v = kw.value
-                        if k == "view":
-                            if hasattr(v, "value"):
-                                if hasattr(v.value, "id"):
-                                    # for ex above = 'vehiclde_view_groups.show'
-                                    full_routable_func_name = v.value.id + '.' + v.attr
-                                    routable_func_names.append(full_routable_func_name)
+        if not hasattr(node, 'value'):
+            return
+        if not isinstance(node.value, ast.Call):
+            return
+        call = node.value
+        if not self.is_add_route_call(call):
+            return
+
+        for kw in call.keywords:
+            k = kw.arg
+            v = kw.value
+            if k == "view":
+                if hasattr(v, "value"):
+                    full_name = get_fully_qualified_func_name(v)
+                    if "." not in full_name:
+                        # Crap, someone imported the view into the local
+                        # namespace so we don't know the fully qualified
+                        # name. Why would you do that?
+                        return
+                    self.routable_func_names.append(full_name)
         self.generic_visit(node)
 
 
 def get_routes(path):
-    global routable_func_names
-    file_contents = file(path).read()
+    with open(path) as f:
+        file_contents = f.read()
     tree = ast.parse(file_contents)
-    route_visitor().visit(tree)
-    return routable_func_names
+    visitor = RouteVisitor()
+    visitor.visit(tree)
+    return visitor.routable_func_names
 
 
 def main():
-    pp = pprint.PrettyPrinter(indent=4)
     target_dir = usage()
 
-    route_path = "/Users/collin/src/api/Uber/uber/routing.py"
+    route_path = os.path.join(target_dir, "routing.py")
     routes = get_routes(route_path)
-    views_dir = target_dir + os.sep + "views"
-    print "%d routes." % len(routes)
+    views_dir = os.path.join(target_dir, "views")
+    print("%d routes." % len(routes))
 
     route_to_auth_type = get_auth_type_for_routes(views_dir, routes)
-
-
-    anon_auth = []
-    token_auth = []
-    admin_auth = []
-    service_auth = []
-    #print "%d routes with auth types we can grok" % len(route_to_auth_type.keys())
+    # print("%d routes with auth types we can grok" % len(route_to_auth_type.keys()))
 
     # for different types see lib/api_auth.py
-    for route,(at, fp, lineno) in route_to_auth_type.iteritems():
-        if at == "token":
-            print fp + " +" + str(lineno)
-            token_auth.append(route)
-            continue
-        if at == "token_or_service":
-            print fp + " +" + str(lineno)
-            token_auth.append(route)
-            continue
-        if at == "GAPING_SECURITY_HOLE":
-            print fp + " +" + str(lineno)
-            anon_auth.append(route)
-            continue
+    routes_by_auth_type = defaultdict(list)
+    for route, (auth_type, path, lineno) in route_to_auth_type.iteritems():
+        routes_by_auth_type[auth_type].append((route, path, lineno))
 
-        if at == "no_auth_required":
-            print fp + " +" + str(lineno)
-            anon_auth.append(route)
-            continue
-
-        if at == "service_wall_factory":
-            service_auth.append(route)
-            continue
-        if at == "admin":
-            admin_auth.append(route)
-            continue
-
-        if at == "admin_not_restricted":
-            admin_auth.append(route)
-            continue
-
-        if at == "super_admin":
-            admin_auth.append(route)
-            continue
-
-
+    for auth_type, routes in routes_by_auth_type.items():
+        for route in routes:
+            print(auth_type, route)
 
 if __name__ == "__main__":
     main()
-
-
-
