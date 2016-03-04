@@ -2,10 +2,14 @@
 from __future__ import print_function
 
 import ast
+import datetime as dt
 import sys
+import operator
 import os
 import os.path
-from collections import defaultdict
+from collections import defaultdict, namedtuple, OrderedDict
+
+import git
 
 STR_AUTH_MAP = {
     "token": "token_wall",
@@ -21,16 +25,53 @@ STR_AUTH_MAP = {
     "trip_rate_wall": "trip_rate_wall",
 }
 
+BADNESS_ORDER = [
+    'insecure_wall',
+    'token_wall_allow_banned',
+    'token_wall',
+    'token_or_service',
+    # This is less bad than token because
+    # it tries to do AuthZ checks itself.
+    'user_wall',
+    'admin_and_dispatch_tag_wall',
+    'service_wall',
+    'admin_or_service',
+    'admin_wall',
+    'admin_not_restricted_or_service',
+    'admin_not_restricted_wall',
+    'super_admin_wall',
+    'api_global_cert_issuer_wall'
+]
+
+
+def try_index(list_obj, obj):
+    try:
+        return list_obj.index(obj)
+    except ValueError:
+        return -1
+
+
+def sort_routes(route_a, route_b):
+    return cmp(
+            try_index(BADNESS_ORDER, route_a[0]),
+            try_index(BADNESS_ORDER, route_b[0])
+    )
+
+
+RouteResult = namedtuple("RouteResult",
+                         ("route", "auth_type", "path", "rel_path", "lineno", "route_lineno", "match"))
+
 
 def usage():
     if len(sys.argv) < 2:
         print("Usage: %s <dir to scan>" % sys.argv[0], file=sys.stderr)
         sys.exit(1)
     target_dir = sys.argv[1]
-    template_dir = os.path.join(target_dir, "templates")
+    template_dir = os.path.join(target_dir, "Uber", "uber", "templates")
     if not os.path.isdir(target_dir) or not os.path.isdir(template_dir):
         print("%s needs to be a directory under which "
-              "there will be a templates/ directory" % target_dir, file=sys.stderr)
+              "there will be a Uber/uber/templates/ directory" % target_dir,
+              file=sys.stderr)
         sys.exit(1)
     return target_dir
 
@@ -42,7 +83,7 @@ def find_decorated_funcs(tree):
                 yield node
 
 
-def get_auth_type_for_routes(views_dir, routes_list):
+def get_all_routes(views_dir, routes):
     """
     routes is the list of parsed view=foo.show() type routes we now want to map to a file and function
 
@@ -51,7 +92,7 @@ def get_auth_type_for_routes(views_dir, routes_list):
     routes_to_auth_type = {}
     files = {}
     # Collect all the files that contain routable functions
-    for route_name in routes_list:
+    for route_name in routes:
         # Lop off the view name so we just have the path
         modules_split = route_name.split(".")
         assert(len(modules_split) > 1)
@@ -69,15 +110,15 @@ def get_auth_type_for_routes(views_dir, routes_list):
             for dec in node.decorator_list:
                 full_node_name = ".".join(modules_split + [node.name])
                 # Not a routable function? Don't care.
-                if full_node_name not in routes_list:
+                if full_node_name not in routes:
                     continue
                 auth_type = sniff_decorator_for_access(dec)
                 if not auth_type:
                     continue
-                # Auth type, file path, line number (of function def) (at, fp, lineno)
-                routes_to_auth_type[full_node_name] = (auth_type, path, node.lineno)
+                rel_path = os.path.relpath(path, views_dir)
+                yield RouteResult(full_node_name, auth_type, path, rel_path,
+                                  node.lineno, *routes[full_node_name])
                 break
-    return routes_to_auth_type
 
 
 def is_uberapi_decorator(dec):
@@ -93,6 +134,10 @@ def is_uberapi_decorator(dec):
             """
             return dec.func.id == "UberAPI" and hasattr(dec, "keywords")
     return False
+
+
+def norm_auth_name(name):
+    return name.replace("api_auth.", "").replace("_factory", "")
 
 
 def sniff_decorator_for_access(dec):
@@ -140,15 +185,15 @@ def sniff_decorator_for_access(dec):
                 if not auth_call.func.value.id == "api_auth":
                     print('something else weird is wrong...............', file=sys.stderr)
                     return "unknown"
-                return auth_call.func.attr
+                return norm_auth_name(auth_call.func.attr)
             if hasattr(auth_call.func, "id"):
-                return auth_call.func.id
+                return norm_auth_name(auth_call.func.id)
 
     elif isinstance(auth_call, (ast.Attribute, ast.Name, ast.Call)):
         # custom auth wall? IDKLOL.
         # @UberAPI(auth=_zendesk_user_wall)
         # def index(request):
-        return get_fully_qualified_func_name(auth_call).replace("api_auth.", "")
+        return norm_auth_name(get_fully_qualified_func_name(auth_call))
     # return "unknown" for crap like:
     # @UberAPI(auth=api_auth.user_wall_factory(
     #    'payment_profile',
@@ -170,7 +215,7 @@ def get_fully_qualified_func_name(v):
 
 class RouteVisitor(ast.NodeVisitor):
     def __init__(self):
-        self.routable_func_names = []
+        self.routable_funcs = {}
 
     @staticmethod
     def is_add_route_call(call):
@@ -189,6 +234,8 @@ class RouteVisitor(ast.NodeVisitor):
         if not self.is_add_route_call(call):
             return
 
+        route_match = call.args[1].s
+
         for kw in call.keywords:
             k = kw.arg
             v = kw.value
@@ -200,38 +247,64 @@ class RouteVisitor(ast.NodeVisitor):
                         # namespace so we don't know the fully qualified
                         # name. Why would you do that?
                         return
-                    self.routable_func_names.append(full_name)
+                    self.routable_funcs[full_name] = (v.lineno, route_match)
         self.generic_visit(node)
 
 
-def get_routes(path):
+def get_route_info(path):
     with open(path) as f:
         file_contents = f.read()
     tree = ast.parse(file_contents)
     visitor = RouteVisitor()
     visitor.visit(tree)
-    return visitor.routable_func_names
+    return visitor.routable_funcs
+
+
+def get_line_blames(repo, filename, linenos):
+    tlc = 0
+    line_blames = {}
+    for commit, lines in repo.blame('HEAD', filename):
+        # 1-indexed to 0-indexed
+        these_lines = set()
+        for lineno in linenos:
+            if tlc <= (lineno - 1) < (tlc + len(lines)):
+                these_lines.add(lineno)
+        for lineno in these_lines:
+            line_blames[lineno] = commit
+        tlc += len(lines)
+    return line_blames
 
 
 def main():
     target_dir = usage()
-
-    route_path = os.path.join(target_dir, "routing.py")
-    routes = get_routes(route_path)
-    views_dir = os.path.join(target_dir, "views")
+    code_root = os.path.join(target_dir, "Uber", "uber")
+    route_path = os.path.join(code_root, "routing.py")
+    routes = get_route_info(route_path)
+    views_dir = os.path.join(code_root, "views")
     print("%d routes." % len(routes))
 
-    route_to_auth_type = get_auth_type_for_routes(views_dir, routes)
-    # print("%d routes with auth types we can grok" % len(route_to_auth_type.keys()))
+    all_routes = list(get_all_routes(views_dir, routes))
 
     # for different types see lib/api_auth.py
     routes_by_auth_type = defaultdict(list)
-    for route, (auth_type, path, lineno) in route_to_auth_type.iteritems():
-        routes_by_auth_type[auth_type].append((route, path, lineno))
+
+    route_linenos = sorted(set(x.route_lineno for x in all_routes))
+
+    repo = git.Repo(target_dir)
+    blame_by_line = get_line_blames(repo, route_path, route_linenos)
+    for route in all_routes:
+        routes_by_auth_type[route.auth_type].append(
+            route
+        )
+
+    routes_by_auth_type = OrderedDict(
+            sorted(routes_by_auth_type.items(), cmp=sort_routes)
+    )
 
     for auth_type, routes in routes_by_auth_type.items():
-        for route in routes:
-            print(auth_type, route)
+        for route in sorted(routes, key=operator.attrgetter("route")):
+            commit = blame_by_line[route.route_lineno]
+            print(" - ".join((auth_type, route.route, route.match, unicode(commit.author))))
 
 if __name__ == "__main__":
     main()
