@@ -11,6 +11,43 @@ from collections import defaultdict, namedtuple, OrderedDict
 
 import git
 
+TASK_TEMPLATE = """
+[API] Incorrect AuthZ in {route.match}
+
+Route details
+-------------
+
+* Route Name: {route.route_name}
+* View: {rel_path}:{view_name}
+* URL Pattern: {route.match}
+* Auth Type: {route.auth_type}
+* Created By: {commit.author}
+* Created On: {date}
+
+Summary
+-------
+
+**SUMMARY HERE**
+
+Remediation
+-------
+
+**REMEDIATION HERE**
+
+Example request
+---------------
+
+```
+**EXAMPLE REQUEST HERE**
+```
+
+This route's request origins in the last 30 days
+------------------------------------------------
+
+{request_origins}
+Note that some of the "public" requests may be me testing.
+"""
+
 STR_AUTH_MAP = {
     "token": "token_wall",
     "token_allow_banned": "token_wall_allow_banned",
@@ -59,13 +96,18 @@ def sort_routes(route_a, route_b):
 
 
 RouteResult = namedtuple("RouteResult",
-                         ("route", "auth_type", "path", "rel_path", "lineno", "route_lineno", "match"))
+                         ("route", "auth_type", "path", "rel_path",
+                          "lineno", "route_lineno", "match", "route_name"))
 
 
 def usage():
     if len(sys.argv) < 2:
         print("Usage: %s <dir to scan>" % sys.argv[0], file=sys.stderr)
         sys.exit(1)
+
+    endpoint_name = None
+    if len(sys.argv) > 2:
+        endpoint_name = sys.argv[2]
     target_dir = sys.argv[1]
     template_dir = os.path.join(target_dir, "Uber", "uber", "templates")
     if not os.path.isdir(target_dir) or not os.path.isdir(template_dir):
@@ -73,7 +115,7 @@ def usage():
               "there will be a Uber/uber/templates/ directory" % target_dir,
               file=sys.stderr)
         sys.exit(1)
-    return target_dir
+    return target_dir, endpoint_name
 
 
 def find_decorated_funcs(tree):
@@ -115,6 +157,7 @@ def get_all_routes(views_dir, routes):
                 auth_type = sniff_decorator_for_access(dec)
                 if not auth_type:
                     continue
+
                 rel_path = os.path.relpath(path, views_dir)
                 yield RouteResult(full_node_name, auth_type, path, rel_path,
                                   node.lineno, *routes[full_node_name])
@@ -234,6 +277,7 @@ class RouteVisitor(ast.NodeVisitor):
         if not self.is_add_route_call(call):
             return
 
+        route_name = call.args[0].s
         route_match = call.args[1].s
 
         for kw in call.keywords:
@@ -247,7 +291,7 @@ class RouteVisitor(ast.NodeVisitor):
                         # namespace so we don't know the fully qualified
                         # name. Why would you do that?
                         return
-                    self.routable_funcs[full_name] = (v.lineno, route_match)
+                    self.routable_funcs[full_name] = (v.lineno, route_match, route_name)
         self.generic_visit(node)
 
 
@@ -276,12 +320,12 @@ def get_line_blames(repo, filename, linenos):
 
 
 def main():
-    target_dir = usage()
+    target_dir, route_name = usage()
     code_root = os.path.join(target_dir, "Uber", "uber")
     route_path = os.path.join(code_root, "routing.py")
     routes = get_route_info(route_path)
     views_dir = os.path.join(code_root, "views")
-    print("%d routes." % len(routes))
+    print("%d routes." % len(routes), file=sys.stderr)
 
     all_routes = list(get_all_routes(views_dir, routes))
 
@@ -296,15 +340,39 @@ def main():
         routes_by_auth_type[route.auth_type].append(
             route
         )
+    if route_name:
+        from es_tools import request_recent_origins
+        route = filter(lambda x: x.route == route_name, all_routes)[0]
+        commit = blame_by_line[route.route_lineno]
+        date = dt.datetime.fromtimestamp(commit.committed_date)
+        origins = request_recent_origins(route.route_name)
+        origins_str = ""
+        for name, num in origins.iteritems():
+            origins_str += "* %s: %s\n" % (name, num)
+        view_name = route.route.split(".")[-1]
+        task_rendered = TASK_TEMPLATE.format(
+            route=route,
+            commit=commit,
+            request_origins=origins_str or "* None!\n",
+            date=date,
+            rel_path=os.path.relpath(route.path, target_dir),
+            view_name=view_name
+        )
+        print(task_rendered)
+    else:
+        routes_by_auth_type = OrderedDict(
+                sorted(routes_by_auth_type.items(), cmp=sort_routes)
+        )
 
-    routes_by_auth_type = OrderedDict(
-            sorted(routes_by_auth_type.items(), cmp=sort_routes)
-    )
+        for auth_type, routes in routes_by_auth_type.items():
+            print("\n\nAuth Type: %s\n---------" % auth_type)
 
-    for auth_type, routes in routes_by_auth_type.items():
-        for route in sorted(routes, key=operator.attrgetter("route")):
-            commit = blame_by_line[route.route_lineno]
-            print(" - ".join((auth_type, route.route, route.match, unicode(commit.author))))
+            for route in sorted(routes, key=operator.attrgetter("route")):
+                commit = blame_by_line[route.route_lineno]
+                # date = dt.datetime.fromtimestamp(commit.committed_date)
+                # if date < dt.datetime(year=2015, month=5, day=1):
+                #     continue
+                print(" - ".join((route.route, route.match, unicode(commit.author))))
 
 if __name__ == "__main__":
     main()
