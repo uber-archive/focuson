@@ -1,4 +1,5 @@
 import collections
+import datetime as dt
 import os
 
 import requests
@@ -77,12 +78,23 @@ def request_recent_origins(route_name):
         },
         "size": 0
     }
-    resp = requests.get('https://search.uberinternal.com/elasticsearch/api-sjc1-2016.03.04/_search',
-                        headers=headers,
-                        cookies=cookies,
-                        json=PAYLOAD)
-    res = resp.json()["facets"]["terms"]["terms"]
 
-    return collections.OrderedDict((
-        (x["term"], x["count"]) for x in res
-    ))
+    counted = collections.Counter()
+
+    # With some fudge
+    start_day = dt.datetime.utcnow() - dt.timedelta(hours=1)
+    # API logs are sharded by day, make sure we get as many as we can
+    for i in xrange(30):
+        datestamp = (start_day - dt.timedelta(days=i)).strftime("%Y.%m.%d")
+        resp = requests.get('https://search.uberinternal.com/elasticsearch/api-sjc1-%s/_search' % datestamp,
+                            headers=headers,
+                            cookies=cookies,
+                            json=PAYLOAD)
+        # Guess we don't actually have 30 days worth of logs to look at?
+        if resp.status_code == 404:
+            break
+        res = resp.json()["facets"]["terms"]["terms"]
+
+        counted.update(dict((x["term"], x["count"]) for x in res))
+
+    return collections.OrderedDict(counted.most_common(100))
