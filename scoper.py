@@ -46,6 +46,16 @@ This route's request origins in the last 30 days
 
 {request_origins}
 Note that some of the "public" requests may be me testing.
+
+How many requests included tokens?
+----------------------------------
+
+* With a token: {with_user}
+* Without a token: {without_user}
+
+If any legitimate requests included tokens it is //not// safe
+to switch to service auth, even if they sent a valid `X-Uber-Source`.
+Including a valid token will always cause service auth to fail.
 """
 
 STR_AUTH_MAP = {
@@ -341,11 +351,12 @@ def main():
             route
         )
     if route_name:
-        from es_tools import request_recent_origins
+        from es_tools import request_recent_origins, requests_with_users
         route = filter(lambda x: x.route == route_name, all_routes)[0]
         commit = blame_by_line[route.route_lineno]
         date = dt.datetime.fromtimestamp(commit.committed_date)
         origins = request_recent_origins(route.route_name)
+        request_users = requests_with_users(route.route_name)
         origins_str = ""
         for name, num in origins.iteritems():
             origins_str += "* %s: %s\n" % (name, num)
@@ -356,7 +367,8 @@ def main():
             request_origins=origins_str or "* None!\n",
             date=date,
             rel_path=os.path.relpath(route.path, target_dir),
-            view_name=view_name
+            view_name=view_name,
+            **request_users
         )
         print(task_rendered)
     else:
