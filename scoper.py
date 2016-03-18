@@ -1,6 +1,7 @@
 #!/usr/bin/python
 from __future__ import print_function
 
+import argparse
 import ast
 import datetime as dt
 import sys
@@ -10,6 +11,8 @@ import os.path
 from collections import defaultdict, namedtuple, OrderedDict
 
 import git
+
+from es_tools import request_recent_origins, requests_with_users, route_has_requests
 
 TASK_TEMPLATE = """
 [API] Incorrect AuthZ in {route.match}
@@ -87,8 +90,19 @@ BADNESS_ORDER = [
     'admin_not_restricted_or_service',
     'admin_not_restricted_wall',
     'super_admin_wall',
-    'api_global_cert_issuer_wall'
+    'api_global_cert_issuer_wall',
 ]
+
+SAFE_AUTH_TYPES = {
+    'admin_and_dispatch_tag_wall',
+    'service_wall',
+    'admin_or_service',
+    'admin_wall',
+    'admin_not_restricted_or_service',
+    'admin_not_restricted_wall',
+    'super_admin_wall',
+    'api_global_cert_issuer_wall',
+}
 
 
 def try_index(list_obj, obj):
@@ -111,21 +125,25 @@ RouteResult = namedtuple("RouteResult",
 
 
 def usage():
-    if len(sys.argv) < 2:
-        print("Usage: %s <dir to scan>" % sys.argv[0], file=sys.stderr)
-        sys.exit(1)
+    args = argparse.ArgumentParser(
+        description="Scans a cloned API repository for security-relevant routes"
+    )
+    args.add_argument("api_root", help="Location of the API repo")
+    args.add_argument("--route", help="Generate an issue template for a route", default=None)
+    args.add_argument("--show-safe", help="Include 'safe' auth types", default=False, action="store_true")
+    args.add_argument("--only-stale", help="Only show views that haven't been requested recently",
+                      default=False, action="store_true")
 
-    endpoint_name = None
-    if len(sys.argv) > 2:
-        endpoint_name = sys.argv[2]
-    target_dir = sys.argv[1]
+    parsed = args.parse_args()
+
+    target_dir = parsed.api_root
     template_dir = os.path.join(target_dir, "Uber", "uber", "templates")
     if not os.path.isdir(target_dir) or not os.path.isdir(template_dir):
         print("%s needs to be a directory under which "
               "there will be a Uber/uber/templates/ directory" % target_dir,
               file=sys.stderr)
         sys.exit(1)
-    return target_dir, endpoint_name
+    return parsed
 
 
 def find_decorated_funcs(tree):
@@ -330,7 +348,10 @@ def get_line_blames(repo, filename, linenos):
 
 
 def main():
-    target_dir, route_name = usage()
+    parsed_args = usage()
+    target_dir = parsed_args.api_root
+    route_name = parsed_args.route
+
     code_root = os.path.join(target_dir, "Uber", "uber")
     route_path = os.path.join(code_root, "routing.py")
     routes = get_route_info(route_path)
@@ -351,7 +372,6 @@ def main():
             route
         )
     if route_name:
-        from es_tools import request_recent_origins, requests_with_users
         route = filter(lambda x: x.route == route_name, all_routes)[0]
         commit = blame_by_line[route.route_lineno]
         date = dt.datetime.fromtimestamp(commit.committed_date)
@@ -377,14 +397,20 @@ def main():
         )
 
         for auth_type, routes in routes_by_auth_type.items():
+            if not parsed_args.show_safe and auth_type in SAFE_AUTH_TYPES:
+                continue
             print("\n\nAuth Type: %s\n---------" % auth_type)
 
             for route in sorted(routes, key=operator.attrgetter("route")):
+                if parsed_args.only_stale:
+                    if route_has_requests(route.route_name):
+                        continue
+
                 commit = blame_by_line[route.route_lineno]
                 # date = dt.datetime.fromtimestamp(commit.committed_date)
                 # if date < dt.datetime(year=2015, month=5, day=1):
                 #     continue
-                print(" - ".join((route.route, route.match, unicode(commit.author))))
+                print(" - ".join((route.route, route.match, route.route_name)))
 
 if __name__ == "__main__":
     main()

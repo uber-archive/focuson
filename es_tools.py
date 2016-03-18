@@ -132,6 +132,7 @@ def fetch_across_indexes(payload, search_type=None):
             if i == 0:
                 raise Exception("No indexes exist?")
             break
+        resp.raise_for_status()
 
         yield resp.json()
 
@@ -178,3 +179,29 @@ def requests_with_users(route_name):
             counter[k] += v["doc_count"]
 
     return counter
+
+
+def route_has_requests(route_name):
+
+    token_auth_payload = get_base_agg_request(route_name)
+    token_auth_payload["aggs"] = {
+        "with_user": {
+            "filter": {
+                "exists": {
+                    "field": "msg_.remote_user_uuid"
+                }
+            }
+        },
+        "without_user": {
+            "missing": {
+                "field": "msg_.remote_user_uuid"
+            }
+        }
+    }
+
+    for resp in fetch_across_indexes(token_auth_payload, "count"):
+        for k, v in resp["aggregations"].items():
+            if v["doc_count"]:
+                return True
+
+    return False
