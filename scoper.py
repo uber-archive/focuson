@@ -83,6 +83,9 @@ BADNESS_ORDER = [
     # This is less bad than token because
     # it tries to do AuthZ checks itself.
     'user_wall',
+    'supply_growth_tag_wall',
+    '_zendesk_user_wall',
+    'admin_insecure_wall',
     'admin_and_dispatch_tag_wall',
     'service_wall',
     'admin_or_service',
@@ -93,6 +96,7 @@ BADNESS_ORDER = [
     'api_global_cert_issuer_wall',
 ]
 
+# Access to routes with these auth types is restricted
 SAFE_AUTH_TYPES = {
     'admin_and_dispatch_tag_wall',
     'service_wall',
@@ -102,6 +106,9 @@ SAFE_AUTH_TYPES = {
     'admin_not_restricted_wall',
     'super_admin_wall',
     'api_global_cert_issuer_wall',
+    '_zendesk_user_wall',
+    'admin_insecure_wall',
+    'supply_growth_tag_wall',
 }
 
 
@@ -121,7 +128,8 @@ def sort_routes(route_a, route_b):
 
 RouteResult = namedtuple("RouteResult",
                          ("route", "auth_type", "path", "rel_path",
-                          "lineno", "route_lineno", "match", "route_name"))
+                          "lineno", "route_lineno", "match", "route_name",
+                          "commit"))
 
 
 def usage():
@@ -153,14 +161,18 @@ def find_decorated_funcs(tree):
                 yield node
 
 
-def get_all_routes(views_dir, routes):
+def get_all_routes(root_dir):
     """
     routes is the list of parsed view=foo.show() type routes we now want to map to a file and function
 
     for each matching route -> file::func return the parse tree for that func
     """
-    routes_to_auth_type = {}
     files = {}
+
+    views_dir = os.path.join(root_dir, "Uber", "uber", "views")
+
+    routes = get_route_info(root_dir)
+
     # Collect all the files that contain routable functions
     for route_name in routes:
         # Lop off the view name so we just have the path
@@ -232,7 +244,6 @@ def sniff_decorator_for_access(dec):
         """
 
         # auth_type = dec.func.args[0].func.attr
-        # routes_to_auth_type[r] = auth_type
         # TODO this doesn't really matter so we can ignore for now...
         return None
 
@@ -323,13 +334,38 @@ class RouteVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-def get_route_info(path):
-    with open(path) as f:
+def get_route_info(root_path):
+    routing_path = os.path.join(root_path, "Uber", "uber", "routing.py")
+    with open(routing_path) as f:
         file_contents = f.read()
     tree = ast.parse(file_contents)
     visitor = RouteVisitor()
     visitor.visit(tree)
-    return visitor.routable_funcs
+    all_routes = visitor.routable_funcs
+
+    # Get the commit that added each route and tack it onto the details
+    route_linenos = sorted(set(x[0] for x in all_routes.values()))
+    repo = git.Repo(root_path)
+    blame_by_line = get_line_blames(repo, routing_path, route_linenos)
+    for name, details in all_routes.iteritems():
+        all_routes[name] = details + (blame_by_line[details[0]],)
+    return all_routes
+
+
+def get_routes_by_auth_type(all_routes):
+    # for different types see lib/api_auth.py
+    routes_by_auth_type = defaultdict(list)
+
+    for route in all_routes:
+        routes_by_auth_type[route.auth_type].append(
+            route
+        )
+    routes_by_auth_type = OrderedDict(
+        sorted(routes_by_auth_type.items(), cmp=sort_routes)
+    )
+    for k, v in routes_by_auth_type.iteritems():
+        v.sort(key=operator.attrgetter("route"))
+    return routes_by_auth_type
 
 
 def get_line_blames(repo, filename, linenos):
@@ -352,29 +388,12 @@ def main():
     target_dir = parsed_args.api_root
     route_name = parsed_args.route
 
-    code_root = os.path.join(target_dir, "Uber", "uber")
-    route_path = os.path.join(code_root, "routing.py")
-    routes = get_route_info(route_path)
-    views_dir = os.path.join(code_root, "views")
-    print("%d routes." % len(routes), file=sys.stderr)
+    all_routes = list(get_all_routes(target_dir))
+    print("%d routes." % len(all_routes), file=sys.stderr)
 
-    all_routes = list(get_all_routes(views_dir, routes))
-
-    # for different types see lib/api_auth.py
-    routes_by_auth_type = defaultdict(list)
-
-    route_linenos = sorted(set(x.route_lineno for x in all_routes))
-
-    repo = git.Repo(target_dir)
-    blame_by_line = get_line_blames(repo, route_path, route_linenos)
-    for route in all_routes:
-        routes_by_auth_type[route.auth_type].append(
-            route
-        )
     if route_name:
         route = filter(lambda x: x.route == route_name, all_routes)[0]
-        commit = blame_by_line[route.route_lineno]
-        date = dt.datetime.fromtimestamp(commit.committed_date)
+        date = dt.datetime.fromtimestamp(route.commit.committed_date)
         origins = request_recent_origins(route.route_name)
         request_users = requests_with_users(route.route_name)
         origins_str = ""
@@ -383,7 +402,7 @@ def main():
         view_name = route.route.split(".")[-1]
         task_rendered = TASK_TEMPLATE.format(
             route=route,
-            commit=commit,
+            commit=route.commit,
             request_origins=origins_str or "* None!\n",
             date=date,
             rel_path=os.path.relpath(route.path, target_dir),
@@ -392,22 +411,17 @@ def main():
         )
         print(task_rendered)
     else:
-        routes_by_auth_type = OrderedDict(
-                sorted(routes_by_auth_type.items(), cmp=sort_routes)
-        )
-
+        routes_by_auth_type = get_routes_by_auth_type(all_routes)
         for auth_type, routes in routes_by_auth_type.items():
             if not parsed_args.show_safe and auth_type in SAFE_AUTH_TYPES:
                 continue
+            if parsed_args.only_stale:
+                routes = filter(lambda x: not route_has_requests(x.route_name), routes)
+            if not routes:
+                continue
             print("\n\nAuth Type: %s\n---------" % auth_type)
-
-            for route in sorted(routes, key=operator.attrgetter("route")):
-                if parsed_args.only_stale:
-                    if route_has_requests(route.route_name):
-                        continue
-
-                commit = blame_by_line[route.route_lineno]
-                # date = dt.datetime.fromtimestamp(commit.committed_date)
+            for route in routes:
+                # date = dt.datetime.fromtimestamp(route.commit.committed_date)
                 # if date < dt.datetime(year=2015, month=5, day=1):
                 #     continue
                 print(" - ".join((route.route, route.match, route.route_name)))
