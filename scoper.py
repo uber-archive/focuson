@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 from __future__ import print_function
 
 import argparse
@@ -388,6 +388,7 @@ def main():
     target_dir = parsed_args.api_root
     route_name = parsed_args.route
 
+    target_dir = os.path.abspath(target_dir)
     all_routes = list(get_all_routes(target_dir))
     print("%d routes." % len(all_routes), file=sys.stderr)
 
