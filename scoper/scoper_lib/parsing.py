@@ -1,9 +1,7 @@
 #!/usr/bin/env python
 from __future__ import print_function
 
-import argparse
 import ast
-import datetime as dt
 import sys
 import operator
 import os
@@ -12,104 +10,7 @@ from collections import defaultdict, namedtuple, OrderedDict
 
 import git
 
-from es_tools import request_recent_origins, requests_with_users, route_has_requests
-
-TASK_TEMPLATE = """
-[API] Incorrect AuthZ in {route.match}
-
-Route details
--------------
-
-* Route Name: {route.route_name}
-* View: {rel_path}:{view_name}
-* URL Pattern: {route.match}
-* Auth Type: {route.auth_type}
-* Created By: {commit.author}
-* Created On: {date}
-
-Summary
--------
-
-**SUMMARY HERE**
-
-Remediation
--------
-
-**REMEDIATION HERE**
-
-Example request
----------------
-
-```
-**EXAMPLE REQUEST HERE**
-```
-
-This route's request origins in the last 30 days
-------------------------------------------------
-
-{request_origins}
-Note that some of the "public" requests may be me testing.
-
-How many requests included tokens?
-----------------------------------
-
-* With a token: {with_user}
-* Without a token: {without_user}
-
-If any legitimate requests included tokens it is //not// safe
-to switch to service auth, even if they sent a valid `X-Uber-Source`.
-Including a valid token will always cause service auth to fail.
-"""
-
-STR_AUTH_MAP = {
-    "token": "token_wall",
-    "token_allow_banned": "token_wall_allow_banned",
-    "admin": "admin_wall",
-    "admin_not_restricted": "admin_not_restricted_wall",
-    "super_admin": "super_admin_wall",
-    "no_auth_required": "insecure_wall",
-    "GAPING_SECURITY_HOLE": "insecure_wall",
-    "admin_and_dispatch_tag": "admin_and_dispatch_tag_wall",
-    "gift_card": "gift_card_wall",
-    "twilio_wall": "twilio_wall",
-    "trip_rate_wall": "trip_rate_wall",
-}
-
-BADNESS_ORDER = [
-    'insecure_wall',
-    'token_wall_allow_banned',
-    'token_wall',
-    'token_or_service',
-    # This is less bad than token because
-    # it tries to do AuthZ checks itself.
-    'user_wall',
-    'supply_growth_tag_wall',
-    '_zendesk_user_wall',
-    'admin_insecure_wall',
-    'admin_and_dispatch_tag_wall',
-    'service_wall',
-    'admin_or_service',
-    'admin_wall',
-    'admin_not_restricted_or_service',
-    'admin_not_restricted_wall',
-    'super_admin_wall',
-    'api_global_cert_issuer_wall',
-]
-
-# Access to routes with these auth types is restricted
-SAFE_AUTH_TYPES = {
-    'admin_and_dispatch_tag_wall',
-    'service_wall',
-    'admin_or_service',
-    'admin_wall',
-    'admin_not_restricted_or_service',
-    'admin_not_restricted_wall',
-    'super_admin_wall',
-    'api_global_cert_issuer_wall',
-    '_zendesk_user_wall',
-    'admin_insecure_wall',
-    'supply_growth_tag_wall',
-}
+from auth_types import BADNESS_ORDER, STR_AUTH_MAP
 
 
 def try_index(list_obj, obj):
@@ -121,8 +22,8 @@ def try_index(list_obj, obj):
 
 def sort_routes(route_a, route_b):
     return cmp(
-            try_index(BADNESS_ORDER, route_a[0]),
-            try_index(BADNESS_ORDER, route_b[0])
+        try_index(BADNESS_ORDER, route_a[0]),
+        try_index(BADNESS_ORDER, route_b[0])
     )
 
 
@@ -130,28 +31,6 @@ RouteResult = namedtuple("RouteResult",
                          ("route", "auth_type", "path", "rel_path",
                           "lineno", "route_lineno", "match", "route_name",
                           "commit"))
-
-
-def usage():
-    args = argparse.ArgumentParser(
-        description="Scans a cloned API repository for security-relevant routes"
-    )
-    args.add_argument("api_root", help="Location of the API repo")
-    args.add_argument("--route", help="Generate an issue template for a route", default=None)
-    args.add_argument("--show-safe", help="Include 'safe' auth types", default=False, action="store_true")
-    args.add_argument("--only-stale", help="Only show views that haven't been requested recently",
-                      default=False, action="store_true")
-
-    parsed = args.parse_args()
-
-    target_dir = parsed.api_root
-    template_dir = os.path.join(target_dir, "Uber", "uber", "templates")
-    if not os.path.isdir(target_dir) or not os.path.isdir(template_dir):
-        print("%s needs to be a directory under which "
-              "there will be a Uber/uber/templates/ directory" % target_dir,
-              file=sys.stderr)
-        sys.exit(1)
-    return parsed
 
 
 def find_decorated_funcs(tree):
@@ -381,51 +260,3 @@ def get_line_blames(repo, filename, linenos):
             line_blames[lineno] = commit
         tlc += len(lines)
     return line_blames
-
-
-def main():
-    parsed_args = usage()
-    target_dir = parsed_args.api_root
-    route_name = parsed_args.route
-
-    target_dir = os.path.abspath(target_dir)
-    all_routes = list(get_all_routes(target_dir))
-    print("%d routes." % len(all_routes), file=sys.stderr)
-
-    if route_name:
-        route = filter(lambda x: x.route == route_name, all_routes)[0]
-        date = dt.datetime.fromtimestamp(route.commit.committed_date)
-        origins = request_recent_origins(route.route_name)
-        request_users = requests_with_users(route.route_name)
-        origins_str = ""
-        for name, num in origins.iteritems():
-            origins_str += "* %s: %s\n" % (name, num)
-        view_name = route.route.split(".")[-1]
-        task_rendered = TASK_TEMPLATE.format(
-            route=route,
-            commit=route.commit,
-            request_origins=origins_str or "* None!\n",
-            date=date,
-            rel_path=os.path.relpath(route.path, target_dir),
-            view_name=view_name,
-            **request_users
-        )
-        print(task_rendered)
-    else:
-        routes_by_auth_type = get_routes_by_auth_type(all_routes)
-        for auth_type, routes in routes_by_auth_type.items():
-            if not parsed_args.show_safe and auth_type in SAFE_AUTH_TYPES:
-                continue
-            if parsed_args.only_stale:
-                routes = filter(lambda x: not route_has_requests(x.route_name), routes)
-            if not routes:
-                continue
-            print("\n\nAuth Type: %s\n---------" % auth_type)
-            for route in routes:
-                # date = dt.datetime.fromtimestamp(route.commit.committed_date)
-                # if date < dt.datetime(year=2015, month=5, day=1):
-                #     continue
-                print(" - ".join((route.route, route.match, route.route_name)))
-
-if __name__ == "__main__":
-    main()

@@ -45,3 +45,7 @@ output/*/index.html
 docs/_build
 
 .DS_Store
+
+# virtualenv
+venv/
+env/
