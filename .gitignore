@@ -49,3 +49,6 @@ docs/_build
 # virtualenv
 venv/
 env/
+
+# sqlite db
+*.db

@@ -70,3 +70,6 @@ deps:
 
 requirements.txt requirements-test.txt: %.txt: %.in | env
 	$|/bin/pip-compile --no-index $^
+
+scoper.db: env/.requirements
+	env/bin/python setup-db.py

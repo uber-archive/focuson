@@ -20,11 +20,16 @@ def try_index(list_obj, obj):
         return -1
 
 
-def sort_routes(route_a, route_b):
+def cmp_auth_types(auth_type_a, auth_type_b):
     return cmp(
-        try_index(BADNESS_ORDER, route_a[0]),
-        try_index(BADNESS_ORDER, route_b[0])
+        try_index(BADNESS_ORDER, auth_type_a),
+        try_index(BADNESS_ORDER, auth_type_b)
     )
+
+
+def sort_routes(route_a, route_b):
+    auth_type_a, auth_type_b = route_a[0], route_b[0]
+    return cmp_auth_types(auth_type_a, auth_type_b)
 
 
 RouteResult = namedtuple("RouteResult",

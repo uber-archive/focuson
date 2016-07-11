@@ -8,12 +8,18 @@ import os
 import os.path
 
 from scoper_lib.auth_types import SAFE_AUTH_TYPES
+from scoper_lib.db.db import db_session
+from scoper_lib.db.helpers import (
+    find_route_by_route_name,
+    save_new_route,
+)
 from scoper_lib.es_tools import (
     request_recent_origins,
     requests_with_users,
     route_has_requests,
 )
 from scoper_lib.parsing import (
+    cmp_auth_types,
     get_all_routes,
     get_routes_by_auth_type,
 )
@@ -85,6 +91,24 @@ def main():
                 # if date < dt.datetime(year=2015, month=5, day=1):
                 #     continue
                 print(" - ".join((route.route, route.match, route.route_name)))
+
+                # TODO: Move this logic somewhere else...
+                db_route = find_route_by_route_name(route.route_name)
+                if not db_route:
+                    print("This route is new!")
+                    save_new_route(auth_type, route.route, route.match, route.route_name)
+                else:
+                    if auth_type != db_route.auth_type:
+                        # only alert if it's a more-bad route
+                        if cmp_auth_types(auth_type, db_route.auth_type) < 0:
+                            print('Auth type on route got worse! {} -> {}'.format(
+                                db_route.auth_type,
+                                auth_type,
+                            ))
+                        with db_session() as session:
+                            db_route.auth_type = auth_type
+                            session.add(db_route)
+
 
 if __name__ == "__main__":
     main()
