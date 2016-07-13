@@ -6,6 +6,7 @@
 #
 gitdb==0.6.4              # via gitpython
 gitpython==2.0.6
+pylru==1.0.9
 requests==2.10.0
 smmap==0.9.0              # via gitdb
 sqlalchemy==1.0.14

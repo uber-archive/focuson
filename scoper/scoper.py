@@ -7,7 +7,13 @@ import sys
 import os
 import os.path
 
+import git
+
 from scoper_lib.auth_types import SAFE_AUTH_TYPES
+from scoper_lib.blame import (
+    get_diff_from_commit,
+    get_line_blame,
+)
 from scoper_lib.db.db import db_session
 from scoper_lib.db.helpers import (
     find_route_by_route_name,
@@ -85,6 +91,7 @@ def main():
                 routes = filter(lambda x: not route_has_requests(x.route_name), routes)
             if not routes:
                 continue
+            repo = git.Repo(target_dir)
             print("\n\nAuth Type: %s\n---------" % auth_type)
             for route in routes:
                 # date = dt.datetime.fromtimestamp(route.commit.committed_date)
@@ -96,6 +103,11 @@ def main():
                 db_route = find_route_by_route_name(route.route_name)
                 if not db_route:
                     print("This route is new!")
+                    auth_commit = get_line_blame(repo, route.path, route.auth_lineno)
+                    diff = get_diff_from_commit(auth_commit)
+                    if diff:
+                        print("Introduced in: {}".format(diff))
+
                     save_new_route(auth_type, route.route, route.match, route.route_name)
                 else:
                     if auth_type != db_route.auth_type:
@@ -105,6 +117,10 @@ def main():
                                 db_route.auth_type,
                                 auth_type,
                             ))
+                            auth_commit = get_line_blame(repo, route.path, route.auth_lineno)
+                            diff = get_diff_from_commit(auth_commit)
+                            if diff:
+                                print("Changed with: {}".format(diff))
                         with db_session() as session:
                             db_route.auth_type = auth_type
                             session.add(db_route)

@@ -1,3 +1,4 @@
 GitPython
+pylru
 requests
 sqlalchemy

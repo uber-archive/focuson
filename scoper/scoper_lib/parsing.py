@@ -2,7 +2,6 @@
 from __future__ import print_function
 
 import ast
-import sys
 import operator
 import os
 import os.path
@@ -11,6 +10,7 @@ from collections import defaultdict, namedtuple, OrderedDict
 import git
 
 from auth_types import BADNESS_ORDER, DEFAULT_AUTH_TYPE, STR_TO_AUTH_TYPE
+from blame import get_line_blames
 
 
 def try_index(list_obj, obj):
@@ -34,8 +34,8 @@ def sort_routes(route_a, route_b):
 
 RouteResult = namedtuple("RouteResult",
                          ("route", "auth_type", "path", "rel_path",
-                          "lineno", "route_lineno", "match", "route_name",
-                          "commit"))
+                          "lineno", "auth_lineno", "route_lineno", "match",
+                          "route_name", "route_commit"))
 
 
 def find_decorated_funcs(tree):
@@ -83,8 +83,22 @@ def get_all_routes(root_dir):
                     continue
 
                 rel_path = os.path.relpath(path, views_dir)
-                yield RouteResult(full_node_name, auth_type, path, rel_path,
-                                  node.lineno, *routes[full_node_name])
+
+                (route_lineno, route_match,
+                    route_name, route_commit) = routes[full_node_name]
+
+                yield RouteResult(
+                    route=full_node_name,
+                    auth_type=auth_type,
+                    path=path,
+                    rel_path=rel_path,
+                    lineno=node.lineno,
+                    auth_lineno=dec.lineno,
+                    route_lineno=route_lineno,
+                    match=route_match,
+                    route_name=route_name,
+                    route_commit=route_commit,
+                )
                 break
 
 
@@ -238,18 +252,3 @@ def get_routes_by_auth_type(all_routes):
     for k, v in routes_by_auth_type.iteritems():
         v.sort(key=operator.attrgetter("route"))
     return routes_by_auth_type
-
-
-def get_line_blames(repo, filename, linenos):
-    tlc = 0
-    line_blames = {}
-    for commit, lines in repo.blame('HEAD', filename):
-        # 1-indexed to 0-indexed
-        these_lines = set()
-        for lineno in linenos:
-            if tlc <= (lineno - 1) < (tlc + len(lines)):
-                these_lines.add(lineno)
-        for lineno in these_lines:
-            line_blames[lineno] = commit
-        tlc += len(lines)
-    return line_blames
