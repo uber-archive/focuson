@@ -3,7 +3,6 @@
 import sys
 import os
 import ast
-import pprint
 import subprocess
 import UserDict
 
@@ -11,6 +10,7 @@ import codegen
 import astpp
 import jinja2
 
+import pprint
 
 
 
@@ -29,6 +29,7 @@ TODO:
     * DONE - Break up giant jinja2 xss rule into a big sink rule that gets interesting variables from the jinja2 but is otherwise just like the eval() test
     * LOTS MORE TESTS
     * add def/use for variables that are tainted but then redefined and safe
+    * taint prop through function calls... can be tricky to determine statically which function will be called but just approximate/best guess based off pythons duck typing rules (class first, then module, then global)
     * Handle taint prop through dicts....... dict creation specifically
     * Handle binOp cases where x = TAINTED; x = x + "some string"; eval(x)
     * Handle eval("foo bar baz %s" % x) case, x = tainted
@@ -39,6 +40,9 @@ TODO:
     * Enhance jinja2 template parsing code to not only look at |safe but any variable that goes into a <script> block
 
 
+README:
+    focuson is a flow-insensitive, intra-procedural dataflow-based program analysis tool for python. Its aim is to find likely areas for security engineers to review for bugs. 
+    In the future it will hopefully become inter-procedural and possibly flow-sensitive
 
 
 
@@ -185,6 +189,556 @@ class codeBundle:
         return "%s %s" % (self.path, repr(self.tainted_vars))
 
 
+class sink:
+    """
+    Represenation of a dangerous sink. 
+    This could be mysql_query() for sqli or it could be a transitively tainted function that if called ends up calling a dangerous sink. This class represents both those concepts
+    A sink is just a function and the argument into that function that if user controlled would be dangerous
+    """
+    def __init__(self, name, arg_offset):
+        self.name = name
+        self.arg_offset = arg_offset
+
+    def __str__(self):
+        return "%s(arg_%s)" % (self.name, self.arg_offset) 
+    def __repr__(self):
+        return "%s(arg_%s)" % (self.name, self.arg_offset) 
+
+
+class functionTaintInfo:
+    """
+    This structure collects all the info we need to track tainting in/out/through a function
+    """
+    def __init__(self, name, ast=None):
+        self.name = name
+        self.ast = ast
+        # Root node = main() or app.route() node, its the entry point for execution, nothing calls it, it dominates other nodes
+        self.is_root_node = None
+
+        # Functions I call in my function body
+        # This is a list of keys that work in the big_map
+        self.outgoing_calls = []
+
+        # Functions that call me
+        self.incoming_calls = []
+
+        # Through-taint or trainsitively tainted.
+        self.ttaint = False
+        
+        # a "primary" source or sink means that known dangerous sources or sinks exist in this function body
+        # ex: request.args is a source, mysql_query() is a sink
+        self.has_pri_sink = False
+        self.has_pri_source = False
+
+        self.pri_sinks = []
+        self.pri_sources = []
+
+class dfaAnalysis:
+    def __init__(self):
+        self.__target_dir = None
+        self.__fn_to_ast = {}
+        self.__big_map = {}
+
+        self.LIST_OF_SINKS = [
+            sink("extend_home_context", 0),
+            sink("render_template", 1),
+            ]
+ 
+    def ingest(self, rootdir):
+        if not os.path.isdir(rootdir):
+            raise Exception("directory %s passed in is not a dir" % rootdir)
+        
+        self.__target_dir = rootdir 
+
+        # walk the dirs/files
+        for root, subdir, files in os.walk(self.__target_dir):
+            for f in files:
+                if f.endswith(".py"):
+                    fullpath = root + os.sep + f
+                    contents = file(fullpath).read()
+                    tree = ast.parse(contents)
+                    self.__fn_to_ast[fullpath] = tree 
+                    print fullpath
+
+    def process_funcs(self):
+        """
+        Take all the asts for each python file ingested and create a new dict, big_map, 
+        keyed off the function name and whose values are a bundle of useful info for taint analysis
+        """
+        if not self.__fn_to_ast.keys() > 0:
+            raise Exception("No asts parsed from filenames to analyze")
+
+
+        # Round 1 - get all the functionDefs in the big map
+        for (fn, fn_ast) in self.__fn_to_ast.items():
+            for n in ast.walk(fn_ast):
+                if isinstance(n, ast.FunctionDef):
+                    name = self.gen_unique_name(fn, n)
+                    print name
+
+                    # preprocess this function and collect all the useful info for later analysis
+                    fti = functionTaintInfo(name)
+                    fti.ast = n
+                    self.__big_map[name] = fti
+
+        # Round 2 - Find every Call() made in each function in big map
+        # For each Call(), resolve it to the right method in the big map
+        for (name, fti) in self.__big_map.items():
+            #print name, repr(fti)
+            fti.outgoing_calls = self.get_funcs_called(fti)
+
+        # Round 3 - for each function compute a list of all caller functions
+        # This is why we should be using a graph, not a big dict... fast querying from either "side".
+        who_called_me = {}
+        for (name, fti) in self.__big_map.items():
+            called = fti.outgoing_calls
+            for fn in called:
+                if who_called_me.has_key(fn):
+                    who_called_me[fn].append(name)
+                else:
+                    who_called_me[fn] = [name]
+
+                self.__big_map[fn].incoming_calls.append(name)
+        # Useful for debugging
+        #pp = pprint.PrettyPrinter(depth=6)
+        #pp.pprint(who_called_me)
+
+        
+        # Round 3 - foreach function see if its body contains any known
+        # dangerous sources or sinks
+        for (name, fti) in self.__big_map.items():
+            # TODO cleanup, one func to fill out list of pri sinks in func body 
+            # and maybe a magical getter/setter/acessor of has_pri_sink based of length of array
+            # either way dont need two funcs for each........
+            fti.has_pri_sink = self.has_pri_sinks(fti)
+            if fti.has_pri_sink:
+                fti.pri_sinks = self.collect_pri_sinks(fti)
+            fti.has_pri_source = self.get_sources(fti)
+ 
+    def main_analysis(self):
+        # We have the big_map, work it.
+        # NOTE - we dont really know if the "list of functions that call one another" portion of the big map is accurate, eyeball it looks not crazy, but needs real validation.
+
+        #bottom-taint (sinks), top-taint (sources)
+        initial_sink_tained_funcs = [k for (k,v) in self.__big_map.items() if v.has_pri_sink == True]
+        #print 'initial sink tained funcs = %s' % repr(initial_sink_tained_funcs)
+        self.walkup(initial_sink_tained_funcs, self.LIST_OF_SINKS)
+
+
+
+
+    def far_taint_analysis(self, cf_key, incoming_sinks):
+        """ The workhouse function
+        cf = current function
+
+        given a function (cf) and a global list of sinks determine:
+            1. Do any of my, cf, sources flow to any of these sinks? If so, bug
+            2. Do I permit transitive taint flow from my arguments to any of these sinks? if so I BECOME a sink for the next round
+
+        We would expect the contents of incoming_sinks to be extend_home_contract(),
+        mysql_query() and similar AND randomFunc2() that is is trainsitively tainted from previous rounds
+
+        To do this we must analyize all assignments inside cf
+        """
+        #print astpp.dump(n)
+
+        #print "\n" * 3 
+        #print astpp.dump(fti.ast)
+
+        cf = self.__big_map[cf_key]
+        
+        if not cf:
+            return
+
+        # Collect the argument names to this function
+        assert isinstance(cf.ast, ast.FunctionDef)
+        args = []
+        for arg in cf.ast.args.args:
+            arg_name = arg.id
+            args.append(arg_name)
+
+
+        #if cf.name == "/mobile_app.py::first_layer":
+        #    print astpp.dump(cf.ast)
+
+        # A few stages here
+        # 1. Find all matching sinks + argument slots. Get the variable filling that slot, sinkvar
+        # 2. Given that variable look through assigns to propagate taint upwards from sinkvar
+        # 3. With the full set of tainted variables in this function, see if the functions 
+        #   arguments itself flow ultimately to that tainted sink. If they do, mark function transitively tainted!
+        sl = []
+        for s in incoming_sinks:
+            # Get the function-scoped variable name of the argument to our sink
+            tainted_vars = []
+            for n in ast.walk(cf.ast):
+                if isinstance(n, ast.Call):
+                    if hasattr(n.func, "id") and n.func.id == s.name:
+                        # sinkvar = the "thing" being passed into a known dangerous sink at a 
+                        # known dangerous argument offset. ex: mysql_query() argument 0.
+                        # This can be a variable (Name), a list, a dict or a call. 
+
+                        # A few funky function argument configations out there, bail and handle someday
+                        if not hasattr(n, "args"):
+                            continue
+                        if not len(n.args) > 0:
+                            continue
+
+                        # if an instance of a sink doesn't have enough args to match our sink, on to the next one...
+                        # This happens with render_template() for ex which is sometimes 
+                        # called with 1 arg, sometimes with 2 and the tainted arg is the second
+                        if (s.arg_offset +1) > len(n.args):
+                            continue
+
+                        sinkvar = n.args[s.arg_offset]
+
+                        # The simple case. A normal variable name is the argument
+                        if isinstance(sinkvar, ast.Name):
+                            tvarname = n.args[s.arg_offset].id
+                            tainted_vars.append(tvarname)
+
+                        # The argument into the sink is a dict, explode it into 
+                        # assigns and mark the rhs varname as a tainted var
+                        if isinstance(sinkvar, ast.Dict):
+                            k = sinkvar.keys
+                            v = sinkvar.values
+                            for v in sinkvar.values:
+                                if isinstance(v, ast.Name):
+                                    tainted_vars.append(v.id)
+                                    #print v.id
+                                    # TODO more work here, the value of a dict entry can be another dict, a list, and commonly a Call()...
+                                    # also account for True/False etc
+                        
+                        # This is complex to handle, punt for now
+                        if isinstance(sinkvar, ast.Call):
+                            continue
+                        if isinstance(sinkvar, ast.List):
+                            continue
+
+            # Look at all assigns to determine if an argument to this function flows to the sinks arguments
+            if tainted_vars:
+                assigns = []
+
+                # Collect list of assigns
+                for n in ast.walk(cf.ast):
+                    if isinstance(n, ast.Assign):
+                        if not hasattr(n.targets[0], "id") or not hasattr(n.value, "id"):
+                            continue
+                        (lhs, rhs) = (n.targets[0].id, n.value.id)
+                        assigns.append((lhs, rhs))
+         
+                # if we have 8 assigns we need to do 8*8 rounds through loop to 
+                # ensure the assignment taint correctly propagated
+                for x in range(len(assigns)):
+                    for (lhs, rhs) in assigns:
+                        if lhs in tainted_vars:
+                            tainted_vars.append(rhs)
+
+                # The full unique set of tainted vars
+                tainted_vars = list(set(tainted_vars))
+                
+
+                # If there are any sources in this function, we have a bug!
+                matches = []
+                matches = self.find_tainted_sources(cf, tainted_vars)
+                if matches:
+                    self.file_bug(cf, matches)
+
+                # Mark ourselves as a dangerous sink if we propagate taint from our args to a sink
+                # We now have the full set of tainted vars inside this function that flow to the sink
+                # compare these to the functions arguments to know what calls into *this* function 
+                overlap = set(tainted_vars).intersection(set(args))
+                for targ in list(overlap):
+                    targ_offset = args.index(targ)
+                    s = sink(cf.ast.name, targ_offset)
+                    sl.append(s)
+                    # We know cf propagates taint transitively, mark that
+                    self.__big_map[cf_key].ttaint = True
+
+
+        # We can conclude I, cf, am trainsitively tainted so return my callers
+        # to be recursively investigated as I was
+        if self.__big_map[cf_key].ttaint:
+            return cf.incoming_calls, sl
+        else:
+            return [], sl
+
+    def find_tainted_sources(self, cf, sink_tainted_vars):
+        matches = []
+        source_tainted_vars = []
+        for n in ast.walk(cf.ast):
+            # Look at all the assigns to find any cases of foo = request.*
+            if isinstance(n, ast.Assign):
+                if not hasattr(n.targets[0], "id"):
+                    continue
+                (lhs, rhs) = (n.targets[0].id, n.value)
+                #print 'lhs: %s' % repr(lhs)
+                #print 'rhs: %s' % repr(rhs)
+                if self.dangerous_source_assignment(rhs):
+                    source_tainted_vars.append(lhs)
+
+            # Handle app.route("/foo/<some_argument>")
+            if isinstance(n, ast.FunctionDef) and hasattr(n, "decorator_list"):
+                if len(n.decorator_list) > 0:
+                    for deco in n.decorator_list:
+                        if isinstance(deco, ast.Call):
+                            if hasattr(deco.func, "attr") and deco.func.attr == "route":
+                                if hasattr(deco.args[0], "s"):
+                                    route_string = deco.args[0].s
+                                    if route_string.count("<") > 0:
+                                        # We have a route string with args, map those to the args in the function then consider them tainted
+                                        # ex: /signup/<city_name>/<flow_type_name>/confirmation/
+                                        for arg in n.args.args:
+                                            source_tainted_vars.append(arg.id)
+ 
+        #print "\t sink tainted: %s" % repr(sink_tainted_vars)
+        #print "\t source tainted: %s" % repr(source_tainted_vars)
+        for v in source_tainted_vars:
+            if v in sink_tainted_vars:
+                matches.append(v)
+
+        return matches
+
+    def file_bug(self, cf, matches):
+        print '\nA bug!'
+        print cf.name
+        print repr(matches)
+        # this is TOUGH, we either have to store lots of callchain info of flows or do top down source->sink analysis to be
+        # able to nicely print the chain
+        #print "ttained?", cf.ttaint
+        #print 'outgoing calls', repr(cf.outgoing_calls)
+        #an_outgoing_call = self.__big_map[cf.outgoing_calls[0]]
+        #print 'outgoing tainted?', an_outgoing_call.ttaint
+
+
+    def dangerous_source_assignment(self, n):
+        """
+        Look at an the right hand side of an assignment to determine if dangerous.
+        Right now this only means flask request object represented in a few ways. 
+        """
+        # xx = request.args['foo'] is an ast.Subscript
+        if isinstance(n, ast.Subscript):
+            if n.value.value.id == "request":
+                return True
+
+        # xx = request.args.get('foo') is an ast.Call()
+        if isinstance(n, ast.Call):
+            if hasattr(n.func, "value") and hasattr(n.func.value, "value") \
+                    and hasattr(n.func.value.value, 'id'):
+                if n.func.value.value.id == 'request':
+                    return True
+
+            #  xxx = flask.request.headers.get('Host')
+            if hasattr(n.func, "value") and hasattr(n.func.value, "value") \
+                    and hasattr(n.func.value.value, "value") \
+                    and hasattr(n.func.value.value.value, 'id') \
+                    and hasattr(n.func.value.value, 'attr'):
+                if n.func.value.value.value.id == 'flask' and n.func.value.value.attr == 'request':
+                    return True
+        return False
+
+
+
+    def walkup(self, func_list, sink_list):
+        """
+        Recursively analyize functions to determine of they propagate taint.
+        func_list is a set of functions that call into or contain tainted sinks
+        sink_list could be primary sinks (mysql_query) or transitive (function blah(arg1, arg2) which we know passes arg1 into mysql_query()
+
+        Each run of walkup() collects more sinks and functions to check out
+        """
+
+        while len(func_list) > 0:
+
+            # The current function to work
+            cf_key = func_list.pop()
+            cf = self.__big_map[cf_key]
+
+            print "\n Incoming f: %s sinks: %s" % (cf.name, repr(sink_list))
+            funcs_to_check_out, sinks_to_consider = self.far_taint_analysis(cf_key, sink_list)
+            print "\toutgoing f: %s sinks: %s" % (repr(funcs_to_check_out), repr(sinks_to_consider))
+
+            self.walkup(funcs_to_check_out, sinks_to_consider)
+
+
+
+
+
+            """
+
+            if cf.has_pri_sink and cf.has_pri_source:
+                print 'the impossibly easy case happened!'
+
+
+
+            
+            if cf.has_pri_sink:
+                # A function has sinks in it that are tainted, propagate this taint upwards by:
+                # 1. finding everyone who calls $current_funcion (cf)
+                # 2. Going to each caller, checking if they have sources that flow into a tainted arg into a Call to $cf
+                # 3. if they dont have sources but do accept arguments, mark them as a transitively tainted block and keep on chewing the chain upwards
+                if len(cf.incoming_calls) > 0:
+                    print 'im sinky: %s and I am called by: %s' % ( cf_key, repr(cf.incoming_calls))
+
+                    funcs_to_check_out, sinks_to_consider  = self.far_taint_analysis(cf, cf.pri_sinks)
+                    self.walkup(funcs_to_check_out, sinks_to_consider)
+
+
+                    # mark the callers as tainted 
+                    # TODO this needs intra_taint_analysis() run first to be accurate at all of course...
+                    for k in cf.incoming_calls:
+                        self.__big_map[k].ttaint = True
+                    # walkup(cf.incoming_calls)
+
+            # Tthis is BY FAR most common case so move to first test in this loop for perf.....
+            if cf.ttaint:
+                # Uncomment once this func is written... its applicable for this case too
+                #funcs_to_check_out = self.far_taint_analysis(cf)
+                #self.walkup(funcs_to_check_out)
+                pass
+
+            """
+
+            """
+            rough notes from whiteboard + pacing
+            main() -> three() -> four() -> five()
+            five() contains mysql_query()
+            near/far analysis, near = do I contain a request.whatever?
+            far = do I:
+                1. have people that call me
+                2. take arguments
+                3. have assignments/etc that allow any of my arguments to pass to my sink, which could actually just be a call to a function we know has throughtaint (ttaint)
+                4. (future) not have any sanitization functions blocking these paths
+
+            """
+
+    def intra_taint_analysis(self, fti):
+        """ Given a function determine
+        """
+        pass
+
+        # TODO other big chunk of work is doing the assingment analysis inside the function body
+        """
+         I think we basically want to determine bottoms up here
+         that means if a->b->c->d->e and we are c() and e() has dangerous_sink our goal is to
+         figure out if:
+         1. we have a danger source that feeds into our Call of d() which feeds into its Call of e() which feeds into e()s dangerous_sink() call
+         2. If not #1, we want to figure out all our callers and walk up the chain (which is handled by walkup() above)
+
+         We want to determine if any of our inputs as a func (arguments) make it to OUR dangerous sink which isn't a REAL PRIMARY dangerous sink like mysql_query() but instead
+         the function call to d() or e() which themselves have been checked for trainsitive or primary taintedness.
+        """
+        
+                
+    def collect_pri_sinks(self, fti):
+        L = []
+        for n in ast.walk(fti.ast):
+            if isinstance(n, ast.Call):
+                if hasattr(n.func, "id"):
+                    for s in self.LIST_OF_SINKS:
+                        if n.func.id == s.name:
+                            L.append(s)
+        return L
+ 
+       
+    # TODO, optimization we prob dont need a has sinks AND a collect sinks, they do the same amount of work...
+    def has_pri_sinks(self, fti):
+        """ 
+        Has Primary Sinks - determine if there are any dangerous sinks in the
+        body of a function (pri = primary aka originate from here)
+
+        Sinks are function calls that if a user-controlled variable flowed into
+        then we may have found a security flaw.
+        """
+        L = []
+        # just tesitng for now but this should eventually contain all the known sink rules:
+        #  sqli, exec(), file read maybe, xss through jinja, etc
+        for n in ast.walk(fti.ast):
+            if isinstance(n, ast.Call):
+                if hasattr(n.func, "id"):
+                    for s in self.LIST_OF_SINKS:
+                        if n.func.id == s.name:
+                            return True
+        return False 
+
+
+    def get_sources(self, fti):
+        # TODO parse the body of a given ast funcDef and determine if there are any request.* whatevers
+        L = []
+        return L
+        
+    
+
+
+    def get_funcs_called(self, fti):
+        """ 
+        Given a function, f1 determine all the other functions f1 calls.
+        Return all those functions to be used later for taint propagation
+        """
+        assert type(fti.ast) == ast.FunctionDef
+
+        L = []
+        for n in ast.walk(fti.ast):
+            if isinstance(n, ast.Call):
+
+                # Goal here is parsing the Call() instances to get a reasonable function name out of them
+                # Calls() are often Names or Attribute notes
+                funcname = None
+                if isinstance(n.func, ast.Name):
+                    funcname = n.func.id
+                if isinstance(n.func, ast.Attribute):
+                    if hasattr(n.func.value, "id"):
+                        funcname = n.func.value.id + n.func.attr
+                    else:
+                        # This triggers for cases of "somestring".format(blah) the format() Call() is being processed
+                        # safe to ignore I believe 
+                        if n.func.attr == "format":
+                            continue
+
+                # We cannot determine a name for this Call() instance
+                if not funcname:
+                    continue
+    
+                # A big blacklist of functions that if there is a Call() instance to, we dont care
+                # This is for things we know are safe or happen often and are likely safe
+                # Currently this is mostly _ (translation function) and things prefaced with test_
+                if funcname == "_" or funcname.startswith("test_"):
+                    continue
+
+                k = self.__big_map.keys()
+                for k in self.__big_map.keys():
+                    (filename_from_map, funcname_from_map) = k.split("::")
+                    if funcname == funcname_from_map:
+                        L.append(k)
+        #print "all Calls() in function %s are: " % fti.name, repr(L)
+        return L
+
+ 
+
+    def gen_unique_name(self, fn, n):
+        subfn = fn[len(self.__target_dir) :]
+
+        # This should be file.py::module::class:function or similar to be explicit and unique
+        unique_name = subfn + "::" + n.name
+        return unique_name
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 class loginAnalysis:
@@ -204,8 +758,9 @@ class loginAnalysis:
 
         # a security engineer is running this against a directory of code to 
         # find hints on where to look for bugs
-        self.manual_mode = None
-        self.verbose = None
+        self.manual_mode = False 
+        self.verbose = False 
+        self.very_verbose = False 
 
         self.__api_routes = None
 
@@ -225,8 +780,6 @@ class loginAnalysis:
                     c = codeBundle(fullpath, tree)
                     self.__fn_to_cb[fullpath] = c
 
-        #pp = pprint.PrettyPrinter(indent=4)
-        #pp.pprint(self.__paths_to_ast)
 
     def is_known_borning_deco(self, deco):
         """ given a decorator in ast node form see if we want to discard it or not"""
@@ -336,8 +889,7 @@ class loginAnalysis:
         pass
 
     def is_dangerous_source_assignment(self, node):
-        #Two families of dangerous stuff
-        #1. Anything from request.*
+        # TODO fill this in further over time, request is a pretty flask-y construct so other frameworks will have other dangerous sources
         if isinstance(node, ast.Call):
             #print astpp.dump(node)
 
@@ -419,8 +971,10 @@ class loginAnalysis:
         return tainted_variables
 
     # This could be so much more elegant and recrusive and nice. 
-    def propagate_taint(self, initial_tainted_variables, total_assigns):
+    def propagate_assignment_taint(self, initial_tainted_variables, total_assigns):
         """
+        optimistically spread taint
+
         Look through every assignment (within a function body) looking for assignments *from* variables we know are tainted. This set is seeded by the initial_tainted_variables list. 
         If we see an assignment from a known tainted right hand side variable to a lhs variable, make that lhs variable also tainted. 
 
@@ -471,6 +1025,7 @@ class loginAnalysis:
         permissive_auth_types = ["token", "token_or_service", "GAPING_SECURITY_HOLE", "no_auth_required"]
         permissive = []
 
+        # TODO need to add request.iv and/or ensure it works as a dangerous source
 
         if hasattr(node, "decorator_list"):
             for dec in node.decorator_list:
@@ -504,6 +1059,20 @@ class loginAnalysis:
 
 
 
+    def find_recurisvely_tainted_flows(self, template_dir):
+        # Do import resolution.....
+        for fn, cb in self.__fn_to_cb.items():
+            #print "cb..." + repr(cb)
+            print astpp.dump(cb.tree)
+            for f in cb.funcs:
+                print fn, repr(f)
+
+    
+    def experimental_dfa(self, target_dir):
+        """
+        """
+        pass
+
     def find_tainted_flows(self, template_dir):
         """ Find all tainted variables then all dangerous sinks
             Given this information pass it into our collection of rules to emit issues
@@ -517,25 +1086,25 @@ class loginAnalysis:
         #r = get_routes("/Users/collin/src/api/Uber/uber/routing.py")
         #print repr(r)
 
-        # For each function determine all the tainted variabls inside it and if any end up in a dangerous sink
+        # For each function determine all the tainted vars inside it and if any end up in a dangerous sink
         for fn, cb in self.__fn_to_cb.items():
             for f in cb.funcs:
 
                 # ast = the function definition sub-ast
                 tree = f.tree 
 
+                #print astpp.dump(f.tree)
                 # foreach function, get initial set of x = request.args('foo') 
                 # then loop through assignments to follow assignment of x to any other variables
                 initial_tainted_vars = self.get_initial_tained_variables_inside_function(f.tree)
-                #print initial_tainted_vars
 
                 total_assigns = [x for x in f.tree.body if type(x) == ast.Assign]
-                tainted_vars = self.propagate_taint(initial_tainted_vars, total_assigns)
+                tainted_vars = self.propagate_assignment_taint(initial_tainted_vars, total_assigns)
                 if len(tainted_vars) > 0:
                     self.__fn_to_cb[fn].tainted_vars = tainted_vars
-                    if self.manual_mode:
-                        pass #print '%s:%d in %s -> '  % (fn, int(f.tree.lineno), f.tree.name) + repr(tainted_vars)
-                        #print '%s:%d in %s -> '  % (fn, int(f.tree.lineno), f.tree.name) + repr(tainted_vars)
+                    if self.manual_mode and self.very_verbose:
+                        print '%s:%d in %s -> '  % (fn, int(f.tree.lineno), f.tree.name) + repr(tainted_vars)
+                        print '%s:%d in %s -> '  % (fn, int(f.tree.lineno), f.tree.name) + repr(tainted_vars)
 
                 # Find all instances of dangerous sinks
                 for n in ast.walk(tree):
@@ -551,11 +1120,20 @@ class loginAnalysis:
                         self.api_routable_func_and_tainted(fn, n, tree, tainted_vars)
 
 
+        # build mapping of functions -> code blocks. file.py::module::class::function -> code block
+        # loop through all of them, parsing for assignment or Call-based taintedness sources
+        # for each of the functions that EVER had a Call() to it with a tainted source set aside in tainted_args_funcs{}
+        # foreach func in tainted_args_funcs look at body and look for 
+        # 1. dangerous sinks.
+        #   once we find dangersinks we do the same thing we do above, except we now have a larger set of tainted vars because we include the ones that were arguments passed into us
+        #   NOTE! This will only catch 1 call deep vuln chains....... really need to build this to do it n times, then set n=5 or whatever based on experiment
+        # 2. more Call()s with tainted data.... then we basically recurse into this same thing
+
+
 
         #issues = [ x for x in issues if x is not None]
         #print 'Issues: ' + repr(issues)
 
-                #print astpp.dump(f.tree)
 
 
 
@@ -684,7 +1262,8 @@ class loginAnalysis:
 
         # If the arguments to templated (the return value, as a dict) contained tainted vars...
         if len(templated_danger_vars) > 0:
-            print "%s +%d templated() vars: %s" % (source_filename, n.lineno, repr(templated_danger_vars))
+            if self.manual_mode:
+                print "%s +%d templated() vars: %s" % (source_filename, n.lineno, repr(templated_danger_vars))
             #print repr(unsafe_tn_to_varnames.keys())
             for node in ast.walk(tree):
                 if isinstance(node, ast.Return):
@@ -714,6 +1293,7 @@ class loginAnalysis:
                             pass
                             #print astpp.dump(node.value)
                             # TODO this work is lower-value, maybe do it someday. Only thing in the world that uses extend_home_context is web-p2 and in only ~40 places
+                            # TODO include extend_signup_contract().. see D220082 in test/ folder
                             #print 'got a cal.........'
                             #Call(func=Name(id='extend_home_context', ctx=Load()), args=[
 
@@ -809,7 +1389,8 @@ class loginAnalysis:
                     print "Unicode problems with %s" % tn
                 continue
 
-        print "Processing %d py files and %d / %d templates..." % (len(self.__fn_to_cb.keys()), len(templatename_to_parse_tree.keys()), len(list(env.list_templates(".html"))))
+        if self.verbose:
+            print "Processing %d py files and %d / %d templates..." % (len(self.__fn_to_cb.keys()), len(templatename_to_parse_tree.keys()), len(list(env.list_templates(".html"))))
 
         return templatename_to_parse_tree
 
@@ -838,17 +1419,11 @@ class loginAnalysis:
 
 
     def find_all_safe_filter(self, tn_to_ast):
-        """ Basic idea here is a few passes over the template asts, first to get calls to |safe, then to get the variables that filter is applied to
+        """ Make a few passes over the template asts, first to get calls to |safe, then to get the variables 
+        that filter is applied to. We return a templatename and a list of unsafe variables that flow into the
+        portion of the template marked "|safe".
         
-        returns a templatename and list of unsafe variables using the |safe filter.
-
-
-        Lots going on here
-
-        First we parsed the jinja2 .html template into python
-        Then we parsed that python with the ast module
-        the pattern for people using |safe in such python is that first the jinja does t_1 = environgment.filters['safe']
-        Then we look for every ast.Call to t_1 whgich we know is |safe
+        The pattern looks like t_1 = environgment.filters['safe']
         """
 
 
@@ -1275,13 +1850,23 @@ def usage():
 
 
 def main():
-    pp = pprint.PrettyPrinter(indent=4)
-    target_dir = usage()
+    import argparse
+    parser = argparse.ArgumentParser(description="Security-focused program analysis for python.")
+    parser.add_argument('dir', metavar='dir', help='the directory of code to scan')
+    parser.add_argument("-f", "--full", action="store_true", default=False, help="return full (unconfirmed) results")
+    parser.add_argument("-v", "--verbose", action="store_true", default=False, help="increase verbosity")
+    parser.add_argument("-vv", "--veryverbose", action="store_true", default=False, help="really really verbose")
+    args = parser.parse_args()
+
+    target_dir = args.dir
+
+    """
     # future work - have an "analysis router" to look at project, see by loc it is 70% .py and send to the python analyizer. Ditto for javascript etc
     # More research suggests: have an analyzer for each project, patterns are different for login vs api vs web-p2
     la = loginAnalysis()
-    la.manual_mode = True
-    la.verbose = False
+    la.manual_mode = args.full 
+    la.verbose = args.verbose 
+    la.very_verbose = args.veryverbose
 
 
     la.injest_dir(target_dir)
@@ -1292,8 +1877,18 @@ def main():
 
     template_dir = la.find_template_dir()
     #la.rule_find_incredibly_simple_jinja_xss()
+    # EXISTING WORKING THING, UNCOMMENT TO DO NON EXPERIMENTAL WORK
     la.find_tainted_flows(template_dir)
 
+    # uncomment to work on newer, correct stuff
+    #la.find_recurisvely_tainted_flows(template_dir)
+
+    """
+
+    dfa = dfaAnalysis()
+    dfa.ingest(target_dir)
+    dfa.process_funcs()
+    dfa.main_analysis()
 
 if __name__ == "__main__":
     main()
