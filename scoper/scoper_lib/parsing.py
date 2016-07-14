@@ -10,7 +10,7 @@ from collections import defaultdict, namedtuple, OrderedDict
 
 import git
 
-from auth_types import BADNESS_ORDER, STR_AUTH_MAP
+from auth_types import BADNESS_ORDER, DEFAULT_AUTH_TYPE, STR_TO_AUTH_TYPE
 
 
 def try_index(list_obj, obj):
@@ -99,7 +99,7 @@ def is_uberapi_decorator(dec):
                         Str(s='hailstorm'),
                       ], keywords=[], starargs=None, kwargs=None)),
             """
-            return dec.func.id == "UberAPI" and hasattr(dec, "keywords")
+            return dec.func.id == "UberAPI"
     return False
 
 
@@ -107,60 +107,48 @@ def norm_auth_name(name):
     return name.replace("api_auth.", "").replace("_factory", "")
 
 
+# Returns the auth_type for a decorator, or None if it's some other decorator
 def sniff_decorator_for_access(dec):
     if not is_uberapi_decorator(dec):
         return None
-    if not dec.keywords:
-        # print 'some different auth deco pattern\n'
-        # print astpp.dump(dec)
-        """
-        Call(func=Name(id='UberAPI', ctx=Load()), args=[
-            Call(func=Attribute(value=Name(id='api_auth', ctx=Load()), attr='admin_or_service', ctx=Load()), args=[
-                Str(s='ubill'),
-                Str(s='unvaulter'),
-              ], keywords=[], starargs=None, kwargs=None),
-          ], keywords=[], starargs=None, kwargs=None)
 
-
-        @UberAPI(auth=api_auth.admin_not_restricted_or_service(
-            'lucy',
-        ), use_json_dt=False)
-        """
-
-        # auth_type = dec.func.args[0].func.attr
-        # TODO this doesn't really matter so we can ignore for now...
-        return None
+    # Get the arg for the auth function, e.g. @UberAPI(auth=auth_arg)
+    if not hasattr(dec, "keywords"):
+        return DEFAULT_AUTH_TYPE
 
     auth_kwargs = filter(lambda x: x.arg == "auth", dec.keywords)
     if not auth_kwargs:
-        # print 'some different auth deco pattern\n'
-        # print astpp.dump(dec)
-        return None
+        return DEFAULT_AUTH_TYPE
 
-    auth_call = auth_kwargs[0].value
-    if isinstance(auth_call, ast.Str):
-        return STR_AUTH_MAP.get(auth_call.s, auth_call.s)
+    auth_arg = auth_kwargs[0].value
 
-    elif isinstance(auth_call, ast.Call):
-        # print astpp.dump(dec.keywords[0])
-        # print 'got a call..........'
-        # print astpp.dump(dec.keywords[0])
+    if isinstance(auth_arg, ast.Str):
+        # e.g. @UberAPI(auth="admin")
+        return STR_TO_AUTH_TYPE.get(auth_arg.s, "unknown")
 
-        if hasattr(auth_call, "func"):
-            if all(hasattr(auth_call.func, x) for x in {"value", "attr"}):
-                if not auth_call.func.value.id == "api_auth":
-                    print('something else weird is wrong...............', file=sys.stderr)
-                    return "unknown"
-                return norm_auth_name(auth_call.func.attr)
-            if hasattr(auth_call.func, "id"):
-                return norm_auth_name(auth_call.func.id)
+    elif isinstance(auth_arg, ast.Call):
+        if hasattr(auth_arg, "func"):
+            auth_func = auth_arg.func
+            if hasattr(auth_func, "value") and hasattr(auth_func, "attr"):
+                # e.g. @UberAPI(auth=api_auth.service_wall_factory('dispatch'))
+                # e.g. @UberAPI(auth=api_auth.token_or_service('coral', 'edison'))
+                if auth_func.value.id == "api_auth":
+                    return norm_auth_name(auth_func.attr)
+            if hasattr(auth_func, "id"):
+                # Only one case of this (as of 07/11/16):
+                # from uber.lib.api_auth import service_wall_factory
+                # @UberAPI(auth=service_wall_factory('safari'))
+                return norm_auth_name(auth_func.id)
 
-    elif isinstance(auth_call, (ast.Attribute, ast.Name, ast.Call)):
-        # custom auth wall? IDKLOL.
-        # @UberAPI(auth=_zendesk_user_wall)
-        # def index(request):
-        return norm_auth_name(get_fully_qualified_func_name(auth_call))
-    # return "unknown" for crap like:
+    elif isinstance(auth_arg, (ast.Attribute, ast.Name)):
+        # e.g. @UberAPI(auth=api_auth.token_wall)
+        # e.g. @UberAPI(auth=api_auth.admin_insecure_wall)
+        # e.g. @UberAPI(auth=api_auth.api_global_cert_issuer_wall)
+        return norm_auth_name(get_fully_qualified_func_name(auth_arg))
+
+    # (This is the only thing we're returning unknown for - 07/11/16)
+
+    # return "unknown" for everything else, including:
     # @UberAPI(auth=api_auth.user_wall_factory(
     #    'payment_profile',
     #    object_getter=_pp_object_getter(rollout_setting_name='pp_deposit_request'))
