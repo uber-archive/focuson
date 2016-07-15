@@ -4,7 +4,7 @@ def render_endorsement_landing(directed_referral_uuid):
 
     #collin_flawed_two = flask.request.args['foo']
     collin_flawed = request.args['foo']
-    collin_one = request.args.get('foo')
+    collin_one = request.args.get('foo', False)
 
     directed_referral_info = get_directed_referral_info(directed_referral_uuid)
 
@@ -34,4 +34,4 @@ def render_endorsement_landing(directed_referral_uuid):
     #render_template('endorsement.html', rt_arg_1)
 
     #return render_template('endorsement.html', **template_vars)
-    return render_template('endorsement.html', directed_referral_uuid)
+    return render_template('endorsement.html', collin_one)

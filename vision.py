@@ -197,8 +197,17 @@ class sink:
     """
     def __init__(self, name, arg_offset):
         self.name = name
+        # the argument to this function that, if tainted, would be a bug
         self.arg_offset = arg_offset
 
+        # a keyword argument to this function that, if tainted, would be a bug
+        self.keywords = None
+
+        # (still in idea phase) a function that is run upon sink comparison to add custom logic
+        self.kwarg_handler = None
+
+        self.rule = None
+    
     def __str__(self):
         return "%s(arg_%s)" % (self.name, self.arg_offset) 
     def __repr__(self):
@@ -233,17 +242,193 @@ class functionTaintInfo:
         self.pri_sinks = []
         self.pri_sources = []
 
+
+
 class dfaAnalysis:
     def __init__(self):
         self.__target_dir = None
         self.__fn_to_ast = {}
         self.__big_map = {}
+        self.__template_dir = None
+        self.perform_jinja_analysis = True
 
+        self.verbose = True
+        self.__detective_mode = True
+
+
+        self.tside_unsafe_tn_to_vars = {}
+
+        ehc_sink = sink("extend_home_context", 0)
+        rt_sink = sink("render_template", 1)
+        #rt_sink.kwarg_handler = self.rt_sink_kwarg_handler_func
+        rt_sink.rule = self.webp2_render_template_sink_get_tainted_vars
+
+
+
+        # TODO, could there be multiple rules attached to a sink? web-p2..login..api..etc? all need to handle render_template for instance...
         self.LIST_OF_SINKS = [
-            sink("extend_home_context", 0),
-            sink("render_template", 1),
+            ehc_sink,
+            rt_sink,
             ]
  
+
+    def handle_keyword_case(self, n):
+        L = []
+        danger_var_names = []
+        template_filename = n.args[0].s
+        if self.tside_unsafe_tn_to_vars.has_key(template_filename):
+            danger_var_names = self.tside_unsafe_tn_to_vars[template_filename]
+
+        for k in n.keywords:
+            arg = k.arg
+            val = k.value
+            # handle this some day... it cant handle when the value is anything but 
+            # an ast.Name right now, which is probably reasonable
+            # ex: sink("asdf", foo=someFunc(asdf))
+            if not isinstance(val, ast.Name):
+                continue
+
+            # veeeeeery small set
+            if arg in danger_var_names:
+                # a list of ast.Names
+                if isinstance(k.value, ast.Name):
+                    L.append(k.value.id)
+        return L
+
+
+
+    def webp2_render_template_sink_get_tainted_vars(self, n, arg_offset):
+        """
+        this function takes all we know about templates, return a list of python-side variable names
+        that we know to be tainted. 
+
+        TODO - grab good comment from webp2 other rule function...
+        """
+
+        # sinkvar = the "thing" being passed into a known dangerous sink at a 
+        # known dangerous argument offset. ex: mysql_query() argument 0.
+        # This can be a variable (Name), a list, a dict or a call. 
+        
+        # XXX RENAME AND recomment to make this varnames, because that is all it should be, bare strings not ast.Names or anything......
+        tainted_vars = []
+
+        # A sink needs to have at least 1 argument
+        if not hasattr(n, "args"):
+            return tainted_vars 
+        if not len(n.args) > 0:
+            return tainted_vars 
+
+
+        sv_list = []
+        # Handle the different forms a sinks arguments take
+        # normal, keywords and kwargs
+
+        # keyword arguments, sink(foo=var_1)
+        if len(n.keywords) > 0:
+            res = self.handle_keyword_case(n) 
+            if len(res) > 0:
+                sv_list.append(res)
+
+        # kwargs form, sink(**template_vars)
+        elif n.kwargs and isinstance(n.kwargs, ast.Name):
+            sv_list = [n.kwargs.id]
+
+        # Normal form, sink(var_1, var_2)
+        else:
+            # Its possible to call our sink()s without the number of args it takes for taint to propagate
+            # ex: render_template('foo.html') instead of render_template('foo.html', some_var)
+            if (arg_offset + 1) > len(n.args):
+                sv_list = []
+            else:
+                # Its expected this is the most common case
+                sinkvar = n.args[arg_offset]
+                sv_list = [sinkvar]
+        
+
+        # We have collected some ast.Names instances, get their actual varname out and return it
+        for sinkvar in sv_list:
+            # The simple case. A normal variable name is the argument
+            if isinstance(sinkvar, ast.Name):
+                tvarname = sinkvar.id
+                tainted_vars.append(tvarname)
+
+            # The argument into the sink is a dict, explode it into 
+            # assigns and mark the rhs varname as a tainted var
+            if isinstance(sinkvar, ast.Dict):
+                k = sinkvar.keys
+                v = sinkvar.values
+                for v in sinkvar.values:
+                    if isinstance(v, ast.Name):
+                        tainted_vars.append(v.id)
+                        # TODO more work here, the value of a dict entry can be another dict, a list, and commonly a Call()...
+                        # also account for True/False etc
+                    else:
+                        print 'it happened?????????????'
+                        print astpp.dump(v)
+        
+            # This is complex to handle, punt for now
+            if isinstance(sinkvar, ast.Call):
+                continue
+            if isinstance(sinkvar, ast.List):
+                continue
+
+        return tainted_vars
+
+    def rt_sink_kwarg_handler_func(self, n):
+        """
+        This is code that is run every time a Call() instance for render_template() 
+        happens where the arguments are kwargs ({a=b, c=d}, etc)
+        
+        This function uses all the jinja templateside info created to determine if
+        a given instance of a render_template() call is actually vulnerable.
+
+        its debatable if this logic should live IN the sink() class.
+
+
+        n = a sink Call()s ast
+     keywords=[
+            keyword(arg='android_deep_link', value=Name(id='collin_final', ctx=Load())),
+            keyword(arg='one', value=Name(id='foo_one', ctx=Load())),
+            keyword(arg='two', value=Name(id='foo_two', ctx=Load())),
+          ]
+        """
+        # also have to do work ahead of time for render_template (all the template |safe parsing...) to even know what the set of kwargs are that ARE dangerous....
+        #danger_var_names = ['two', 'android_deep_link']
+        danger_var_names = []
+        
+        template_filename = n.args[0].s
+        print 'trying......', template_filename
+        if self.tside_unsafe_tn_to_vars.has_key(template_filename):
+            print '\n\n found one', template_filename
+            danger_var_names = self.tside_unsafe_tn_to_vars[template_filename]
+            print repr(danger_var_names)
+
+        # XXX the realization is that this whole thing needs to be a rule run for eVERY case of render_template... not just the kwarg case....
+        # in which case its basically a rule, like I made before. So expand this somewhat to account for that. Maybe do the same with the other sink() as well
+
+        kw_list = n.keywords
+        L = []
+
+        for k in kw_list:
+            arg = k.arg
+            val = k.value
+            # handle this some day... it cant handle when the value is anything but 
+            # an ast.Name right now, which is probably reasonable
+            # ex: sink("asdf", foo=someFunc(asdf))
+            if not isinstance(val, ast.Name):
+                continue
+
+            if arg in danger_var_names:
+                print 'here........'
+                print repr(self.tside_unsafe_tn_to_vars)
+                print astpp.dump(n)
+                L.append(k.value)
+
+        # return a list of ast.Names
+        return L
+
+
+
     def ingest(self, rootdir):
         if not os.path.isdir(rootdir):
             raise Exception("directory %s passed in is not a dir" % rootdir)
@@ -258,7 +443,12 @@ class dfaAnalysis:
                     contents = file(fullpath).read()
                     tree = ast.parse(contents)
                     self.__fn_to_ast[fullpath] = tree 
-                    print fullpath
+
+        if self.perform_jinja_analysis:
+            self.__template_dir = self.get_template_dir()
+
+
+
 
     def process_funcs(self):
         """
@@ -274,7 +464,6 @@ class dfaAnalysis:
             for n in ast.walk(fn_ast):
                 if isinstance(n, ast.FunctionDef):
                     name = self.gen_unique_name(fn, n)
-                    print name
 
                     # preprocess this function and collect all the useful info for later analysis
                     fti = functionTaintInfo(name)
@@ -320,16 +509,27 @@ class dfaAnalysis:
         # NOTE - we dont really know if the "list of functions that call one another" portion of the big map is accurate, eyeball it looks not crazy, but needs real validation.
 
         #bottom-taint (sinks), top-taint (sources)
-        initial_sink_tained_funcs = [k for (k,v) in self.__big_map.items() if v.has_pri_sink == True]
-        #print 'initial sink tained funcs = %s' % repr(initial_sink_tained_funcs)
-        self.walkup(initial_sink_tained_funcs, self.LIST_OF_SINKS)
+        initial_sink_tainted_funcs = [k for (k,v) in self.__big_map.items() if v.has_pri_sink == True]
+        if self.__detective_mode:
+            print '%d functions containing an initial sink' % len(initial_sink_tainted_funcs)
+
+
+        if self.perform_jinja_analysis:
+            self.tside_unsafe_tn_to_vars =  self.get_unsafe_templateside_variables(self.__template_dir)
+            # ex: tSIDE.......{'open-app.html': ['iphone_deep_link', 'iphone_fallback_link', 'android_deep_link', 'android_fallback_link']}
+
+        self.walkup(initial_sink_tainted_funcs, self.LIST_OF_SINKS)
 
 
 
+    def extract_varname(self, sinkvar):
+        return sinkvar.id
 
     def far_taint_analysis(self, cf_key, incoming_sinks):
-        """ The workhouse function
-        cf = current function
+        """ The workhouse
+        This does two main things
+            1. Runs the rules against a Call() instance to surface bugs
+            2. what #2 says below....... fix this up when less tired. Point is it does two big seperate things
 
         given a function (cf) and a global list of sinks determine:
             1. Do any of my, cf, sources flow to any of these sinks? If so, bug
@@ -338,12 +538,7 @@ class dfaAnalysis:
         We would expect the contents of incoming_sinks to be extend_home_contract(),
         mysql_query() and similar AND randomFunc2() that is is trainsitively tainted from previous rounds
 
-        To do this we must analyize all assignments inside cf
         """
-        #print astpp.dump(n)
-
-        #print "\n" * 3 
-        #print astpp.dump(fti.ast)
 
         cf = self.__big_map[cf_key]
         
@@ -357,12 +552,10 @@ class dfaAnalysis:
             arg_name = arg.id
             args.append(arg_name)
 
-
-        #if cf.name == "/mobile_app.py::first_layer":
-        #    print astpp.dump(cf.ast)
+        #print astpp.dump(cf.ast)
 
         # A few stages here
-        # 1. Find all matching sinks + argument slots. Get the variable filling that slot, sinkvar
+        # 1. Find all matching sinks + args to those sinks, the name of one of those is sinkvar
         # 2. Given that variable look through assigns to propagate taint upwards from sinkvar
         # 3. With the full set of tainted variables in this function, see if the functions 
         #   arguments itself flow ultimately to that tainted sink. If they do, mark function transitively tainted!
@@ -372,47 +565,46 @@ class dfaAnalysis:
             tainted_vars = []
             for n in ast.walk(cf.ast):
                 if isinstance(n, ast.Call):
+                    # if this  Call() matches the name of a sink..
                     if hasattr(n.func, "id") and n.func.id == s.name:
-                        # sinkvar = the "thing" being passed into a known dangerous sink at a 
-                        # known dangerous argument offset. ex: mysql_query() argument 0.
-                        # This can be a variable (Name), a list, a dict or a call. 
 
-                        # A few funky function argument configations out there, bail and handle someday
-                        if not hasattr(n, "args"):
-                            continue
-                        if not len(n.args) > 0:
-                            continue
+                        # This is the meaty part. Some sinks have  fullblown rule inside it.
+                        # The rule is the authority on the set of variables that are tainted in this
+                        # specific instance of a sink-matching Call(). Other sinks are simpler 
+                        # and are only a name and an argument into a Call() of that name
+                        if hasattr(s, "rule") and s.rule:
+                            L = s.rule(n, s.arg_offset)
+                            # TODO refactor... shouldn't need to pass the arg_offset into itself...
+                            for x in L:
+                                tainted_vars.append(x)
+                        else:
+                            if not hasattr(n, "args"):
+                                continue
+                            if not len(n.args) > 0:
+                                continue
 
-                        # if an instance of a sink doesn't have enough args to match our sink, on to the next one...
-                        # This happens with render_template() for ex which is sometimes 
-                        # called with 1 arg, sometimes with 2 and the tainted arg is the second
-                        if (s.arg_offset +1) > len(n.args):
-                            continue
+                            sinkvar = n.args[s.arg_offset]
+                            if isinstance(sinkvar, ast.Name):
+                                tainted_vars.append(sinkvar.id)
+                            elif isinstance(sinkvar, ast.Dict):
+                                for k in sinkvar.keys:
+                                    i = sinkvar.keys.index(k)
+                                    v = sinkvar.values[i]
+                                    if isinstance(v, ast.Name):
+                                        # We can comprehend this, its a varname as a value in a dict, taint it
+                                        tainted_vars.append(v.id)
+        
 
-                        sinkvar = n.args[s.arg_offset]
 
-                        # The simple case. A normal variable name is the argument
-                        if isinstance(sinkvar, ast.Name):
-                            tvarname = n.args[s.arg_offset].id
-                            tainted_vars.append(tvarname)
+            # At this stage tainted_vars are all ast.Names or ast.Dicts etc so extract the actual variable names
+            #for x in tainted_vars:
+            #    print '\n'
+            #    print '-' * 80
+            #    if isinstance(x, str):
+            #        print x
+            #    else:
+            #        print astpp.dump(x)
 
-                        # The argument into the sink is a dict, explode it into 
-                        # assigns and mark the rhs varname as a tainted var
-                        if isinstance(sinkvar, ast.Dict):
-                            k = sinkvar.keys
-                            v = sinkvar.values
-                            for v in sinkvar.values:
-                                if isinstance(v, ast.Name):
-                                    tainted_vars.append(v.id)
-                                    #print v.id
-                                    # TODO more work here, the value of a dict entry can be another dict, a list, and commonly a Call()...
-                                    # also account for True/False etc
-                        
-                        # This is complex to handle, punt for now
-                        if isinstance(sinkvar, ast.Call):
-                            continue
-                        if isinstance(sinkvar, ast.List):
-                            continue
 
             # Look at all assigns to determine if an argument to this function flows to the sinks arguments
             if tainted_vars:
@@ -436,6 +628,9 @@ class dfaAnalysis:
                 # The full unique set of tainted vars
                 tainted_vars = list(set(tainted_vars))
                 
+
+                if self.__detective_mode:
+                    print "%s sinks: %s tained vars: %s" % (cf.name, repr(incoming_sinks), repr(tainted_vars))
 
                 # If there are any sources in this function, we have a bug!
                 matches = []
@@ -499,7 +694,7 @@ class dfaAnalysis:
         return matches
 
     def file_bug(self, cf, matches):
-        print '\nA bug!'
+        print '\n!!!!A bug!'
         print cf.name
         print repr(matches)
         # this is TOUGH, we either have to store lots of callchain info of flows or do top down source->sink analysis to be
@@ -515,10 +710,29 @@ class dfaAnalysis:
         Look at an the right hand side of an assignment to determine if dangerous.
         Right now this only means flask request object represented in a few ways. 
         """
-        # xx = request.args['foo'] is an ast.Subscript
+
+        # xx = True/False/None, skip em
+        if isinstance(n, ast.Name):
+            return False
+
         if isinstance(n, ast.Subscript):
-            if n.value.value.id == "request":
-                return True
+            # xx = request.args['foo']
+            if hasattr(n, "value") and hasattr(n.value, "value"):
+                if n.value.value.id == "request":
+                    return True
+
+            # xx = dictname[some_var_as_key]
+            if hasattr(n, "value") and not hasattr(n.value, "value"):
+                # Lots of work could be done here but it is hard.. punting. 
+                # Need to do more inside-func analysis like with assigns but for dict keys
+                return False
+            else:
+                # Could be rhs here is an object, ex:
+                # trips_required = fuel_cards_config.trips_required[g.user.flow_type_name.lower()]
+                return False
+                #print '\n\n'
+                #print astpp.dump(n)
+                #raise Exception("some wonky case nammed in source assignment")
 
         # xx = request.args.get('foo') is an ast.Call()
         if isinstance(n, ast.Call):
@@ -553,9 +767,9 @@ class dfaAnalysis:
             cf_key = func_list.pop()
             cf = self.__big_map[cf_key]
 
-            print "\n Incoming f: %s sinks: %s" % (cf.name, repr(sink_list))
+            #print "\n Incoming f: %s sinks: %s" % (cf.name, repr(sink_list))
             funcs_to_check_out, sinks_to_consider = self.far_taint_analysis(cf_key, sink_list)
-            print "\toutgoing f: %s sinks: %s" % (repr(funcs_to_check_out), repr(sinks_to_consider))
+            #print "\toutgoing f: %s sinks: %s" % (repr(funcs_to_check_out), repr(sinks_to_consider))
 
             self.walkup(funcs_to_check_out, sinks_to_consider)
 
@@ -723,10 +937,211 @@ class dfaAnalysis:
 
 
 
+    def consume_dir_compile_templates(self, template_dir = None):
+        templatename_to_parse_tree = {}
+
+        if not template_dir:
+            template_dir = self.find_template_dir()
+
+        # There really are no .html teplates
+        if not template_dir:
+            return None
+
+        # Transform templates from html -> py
+        if self.verbose:
+            print 'Template dir is.......' + repr(template_dir)
+        tloader = jinja2.FileSystemLoader(template_dir)
+        env = jinja2.Environment(loader=tloader)
+        env.add_extension('jinja2.ext.autoescape')
+        env.add_extension('jinja2.ext.do')
+        # We might need some special support for this monstrosity
+        env.add_extension('jinja2.ext.with_')
+        env.filters = NopFilters()
+
+        for tn in env.list_templates(".html"):
+            try:
+                source, filename, _ = env.loader.get_source(env, tn)
+                code = env.compile(source, tn, filename, True, True)
+                templatename_to_parse_tree[tn] = ast.parse(code)
+            except jinja2.exceptions.TemplateSyntaxError as e:
+                if self.verbose:
+                    print 'Could not compile "%s": %s : %s' % (tn, e.lineno, e)
+                continue
+            except UnicodeDecodeError, e:
+                if self.verbose:
+                    print "Unicode problems with %s" % tn
+                continue
+
+        if self.verbose:
+            print "Processing %d / %d templates..." % (len(templatename_to_parse_tree.keys()), len(list(env.list_templates(".html"))))
+
+        return templatename_to_parse_tree
+
+
+    def get_unsafe_templateside_variables(self, template_dir = None):
+        """
+        Compile all templates into python. Parse that python to find spots that
+        if there was a variable substituion with user controlled data, would be xss. 
+        In jinja this generally means:
+        1. {{foo | safe}}
+        2. a {{foo}} inside a <script> block
+        3. an html attribute={{foo}} case
+
+        Collect all the templateside variable names for these to pass up
+        into the sink() we create for render_template and templated and similar
+        to lend accuracy to xss rules
+
+        """
+        # output is template name : list of unsafe variables that if filled with user-controlled input would be xss
+        #ex: d = {'templates/foo.html' : ['a', 'variable_blah']}
 
 
 
+        tn_to_ast = self.consume_dir_compile_templates(template_dir)
+        tn_to_unsafe_vars = self.find_all_safe_filter(tn_to_ast)
+        #tn_to_unsafe_vars.append(self.find_all_attribute_xss(tn_to_ast))
+        #tn_to_unsafe_vars.append(self.find_all_script_block_xss(tn_to_ast))
+        return tn_to_unsafe_vars
 
+
+    def get_template_dir(self):
+        """ return the directory containing jinja2 templates
+            ex:  web-p2 is web-p2/partners/templates
+        """
+        template_dirs = set()
+        for root, subdir, files in os.walk(self.__target_dir):
+            for fname in files:
+                fpath = os.path.join(root, fname)
+                if fname.endswith(".html"):
+                    with open(fpath, "rb") as f:
+                        # Hmm, smells like a jinja template!
+                        if b"{%" in f.read():
+                            template_dirs.add(root)
+        # If there are multiple template directories in a repo we might need
+        # repo-specific overrides.
+        return None if not template_dirs else os.path.commonprefix(template_dirs)
+
+
+
+    def find_all_safe_filter(self, tn_to_ast):
+        """ Make a few passes over the template asts, first to get the Call()s to |safe, then to get the variables 
+        that |safe is applied to. We return a templatename and a list of unsafe variables that flow into the
+        portion of the template marked "|safe".
+        
+        The pattern looks like t_1 = environgment.filters['safe']
+        """
+
+
+        # THINGS TO LOOK FOR AT THIS STAGE
+        # attribute-based xss:   <input type="{{field_type}}" class="text-input" name="{{field_name or label}}" value="{{value}}" placeholder="{{label or field_name}}"></input>
+        # <script>block based xss
+
+        unsafe_tn_fn_pairs = []
+        unsafe_tn_vn_pairs = []
+        final_unsafe_tn_vn_pairs = {}
+
+        if not tn_to_ast:
+            return final_unsafe_tn_vn_pairs
+
+        for tn, tree in tn_to_ast.items():
+
+            for node in ast.walk(tree):
+
+                # First step  - find the assignment of the |safe filter to a temp function
+                if isinstance(node, ast.Assign):
+                    """
+                    1. html: <p>{{ more_info|safe }}</p> 
+                    2. python: t_1 = environment.filters['safe']
+                    3. python ast: value=Subscript(value=Attribute(
+                        value=Name(id='environment', ctx=Load()), attr='filters', ctx=Load()), 
+                        slice=Index(value=Str(s='safe')), ctx=Load()))
+                    """
+                    if isinstance(node.value, ast.Subscript) and hasattr(node.value, "value"):
+                        if isinstance(node.value.value, ast.Attribute):
+                            if node.value.value.value.id == "environment" and node.value.value.attr == "filters":
+                                if hasattr(node.value, 'slice'):
+                                    if node.value.slice.value.s == 'safe':
+                                        # This is an instance of safe, get the temporary variable its assigned to, ex: t_1 = environment.filters['safe'] 
+                                        temp_vn = str(node.targets[0].id)
+                                        unsafe_tn_fn_pairs.append( (tn, temp_vn))
+                                        #print safe_func_alias_name
+                                        #print astpp.dump(node)
+ 
+
+        # unless the jinja code is nuts there should only ever be one instance of t_1 = |safe filter...
+        for (tn, temp_vn) in unsafe_tn_fn_pairs:
+            for node in ast.walk(tn_to_ast[tn]):
+                if isinstance(node, ast.Call):
+
+                    if hasattr(node.func, 'id'):
+                        if node.func.id == temp_vn:
+                            # This is the one filter case, ex: {{foo | safe}}
+                            if hasattr(node, 'args') and hasattr(node.args[0], 'id'):
+                                v = str(node.args[0].id)
+                                unsafe_tn_vn_pairs.append( (tn, v))
+
+                            # This is the two filter case, ex: {{ foo | tojson | safe }}
+                            if hasattr(node, 'args') and hasattr(node.args[0], 'func'):
+                                sub_func = node.args[0]
+                                if hasattr(sub_func, 'args') and hasattr(sub_func.args[0], 'id'):
+                                    v = str(sub_func.args[0].id)
+                                    # total hack, if a variable is named _ that means its doing translations and that can never be user-controlled
+                                    if v == "l__":
+                                        continue
+
+                                    unsafe_tn_vn_pairs.append( (tn, v))
+
+        # Third step - find the definition of the variable that had |safe 
+        # We either
+        # 1. Look for a call like l_more_info = context.resolve('more_info')
+        # 2. Instead strip the leading "l_" from the temp jinja python variable name and use that. We only do this for cases where we dont find a resolve() call
+        #  and we are only operating upon instances where there is a |safe filter anyway so we prefer to lose the precision and cast the net more widely. 
+
+
+        # format: {'foo/template_foo.html' : ['var_blah', 'var_doo']}
+
+        for (tn, dangerous_var_name) in unsafe_tn_vn_pairs:
+            confirmed_dangerous_var_names = []
+            unconfirmed_dangerous_var_names = []
+
+            for node in ast.walk(tn_to_ast[tn]):
+                if isinstance(node, ast.Assign):
+                    if hasattr(node, "targets"):
+                        if node.targets[0] and hasattr(node.targets[0], 'id'):
+                            if node.targets[0].id == dangerous_var_name:
+                                """
+                                Assign(targets=[
+                                    Name(id='l_collin_error', ctx=Store()),
+                                  ], value=Call(func=Attribute(value=Name(id='context', ctx=Load()), attr='resolve', ctx=Load()), args=[
+                                    Str(s='collin_error'),
+                                  ], keywords=[], starargs=None, kwargs=None))
+                                """ 
+                                if isinstance(node.value, ast.Call) and hasattr(node, 'value') and hasattr(node.value.func, 'value'):
+                                    if node.value.func.value.id == "context" and node.value.func.attr == "resolve":
+                                        if hasattr(node.value, 'args'):
+                                            confirmed_dangerous_vn = str(node.value.args[0].s)
+                                            confirmed_dangerous_var_names.append( confirmed_dangerous_vn)
+                                            if not final_unsafe_tn_vn_pairs.has_key(tn):
+                                                final_unsafe_tn_vn_pairs[tn] = [confirmed_dangerous_vn]
+                                            else:
+                                                final_unsafe_tn_vn_pairs[tn].append(confirmed_dangerous_vn)
+
+        #print '44444444444444444444444444444..........' + repr(final_unsafe_tn_vn_pairs)
+
+
+        # The ones we parse from the ast come in the form 'signup/foo.html'. Remove leading path info so they can potentially match
+        template_string = os.sep + "templates" + os.sep
+        really_final_unsafe_tn_vn_pairs = {}
+        for tn,v in final_unsafe_tn_vn_pairs.items():
+            if tn.startswith("/"):
+                new_tn = tn[1:]
+                really_final_unsafe_tn_vn_pairs[new_tn] = v
+            else:
+                really_final_unsafe_tn_vn_pairs[tn] = v
+        final_unsafe_tn_vn_pairs = really_final_unsafe_tn_vn_pairs
+ 
+        return final_unsafe_tn_vn_pairs
+ 
 
 
 
@@ -1397,14 +1812,18 @@ class loginAnalysis:
 
     def get_unsafe_templateside_variables(self, template_dir = None):
         """
-        Compile all templates into python, then look for dangerous spots in the template where there is variable subtitution.
-        Currently this is:
+        Compile all templates into python. Parse that python to find spots that
+        if there was a variable substituion with user controlled data, would be xss. 
+        In jinja this generally means:
         1. {{foo | safe}}
         2. a {{foo}} inside a <script> block
+        3. an html attribute={{foo}} case
 
-        After finding all these spots find the variables names that if substituted would create a vuln and return those
+        Collect all the templateside variable names for these to pass up
+        into the sink() we create for render_template and templated and similar
+        to lend accuracy to xss rules
+
         """
-        results = {}
         # output is template name : list of unsafe variables that if filled with user-controlled input would be xss
         #ex: d = {'templates/foo.html' : ['a', 'variable_blah']}
 
