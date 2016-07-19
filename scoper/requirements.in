@@ -1,4 +1,6 @@
 GitPython
+jinja2
 pylru
 requests
+sendgrid ~= 2.2.1
 sqlalchemy

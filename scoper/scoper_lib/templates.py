@@ -1,46 +1,17 @@
-TASK_TEMPLATE = """
-[API] Incorrect AuthZ in {route.match}
+import os.path
 
-Route details
--------------
+import jinja2
 
-* Route Name: {route.route_name}
-* View: {rel_path}:{view_name}
-* URL Pattern: {route.match}
-* Auth Type: {route.auth_type}
-* Created By: {commit.author}
-* Created On: {date}
+script_path = os.path.dirname(__file__)
+templates_path = os.path.join(script_path, "templates")
 
-Summary
--------
+# We re-use a single jinja env instance to allow jinja to do caching
+jinja_env = jinja2.Environment(
+    loader=jinja2.FileSystemLoader(os.path.join(templates_path)),
+    trim_blocks=True
+)
 
-**SUMMARY HERE**
 
-Remediation
--------
-
-**REMEDIATION HERE**
-
-Example request
----------------
-
-```
-**EXAMPLE REQUEST HERE**
-```
-
-This route's request origins in the last 30 days
-------------------------------------------------
-
-{request_origins}
-Note that some of the "public" requests may be me testing.
-
-How many requests included tokens?
-----------------------------------
-
-* With a token: {with_user}
-* Without a token: {without_user}
-
-If any legitimate requests included tokens it is //not// safe
-to switch to service auth, even if they sent a valid `X-Uber-Source`.
-Including a valid token will always cause service auth to fail.
-"""
+def render_template(template_name, *args, **kwargs):
+    template = jinja_env.get_template(template_name)
+    return template.render(*args, **kwargs)

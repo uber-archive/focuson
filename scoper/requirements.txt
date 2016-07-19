@@ -6,7 +6,12 @@
 #
 gitdb==0.6.4              # via gitpython
 gitpython==2.0.6
+jinja2==2.8
+markupsafe==0.23          # via jinja2
 pylru==1.0.9
+python-http-client==1.2.3  # via sendgrid
 requests==2.10.0
+sendgrid==2.2.1
 smmap==0.9.0              # via gitdb
+smtpapi==0.3.1            # via sendgrid
 sqlalchemy==1.0.14

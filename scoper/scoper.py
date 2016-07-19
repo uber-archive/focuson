@@ -7,29 +7,26 @@ import sys
 import os
 import os.path
 
-import git
-
 from scoper_lib.auth_types import SAFE_AUTH_TYPES
-from scoper_lib.blame import (
-    get_diff_from_commit,
-    get_line_blame,
-)
-from scoper_lib.db.db import db_session
-from scoper_lib.db.helpers import (
-    find_route_by_route_name,
-    save_new_route,
-)
+from scoper_lib.check_changes import check_routes_for_changes
 from scoper_lib.es_tools import (
     request_recent_origins,
     requests_with_users,
     route_has_requests,
 )
+from scoper_lib.mail import send_email
 from scoper_lib.parsing import (
-    cmp_auth_types,
     get_all_routes,
     get_routes_by_auth_type,
 )
-from scoper_lib.templates import TASK_TEMPLATE
+from scoper_lib.task_template import TASK_TEMPLATE
+
+
+def print_routes(routes):
+    for auth_type, auth_type_routes in routes.items():
+        print("\n\nAuth Type: %s\n---------" % auth_type)
+        for route in auth_type_routes:
+            print(" - ".join((route.route, route.match, route.route_name)))
 
 
 def usage():
@@ -65,7 +62,7 @@ def main():
 
     if route_name:
         route = filter(lambda x: x.route == route_name, all_routes)[0]
-        date = dt.datetime.fromtimestamp(route.commit.committed_date)
+        date = dt.datetime.fromtimestamp(route.route_commit.committed_date)
         origins = request_recent_origins(route.route_name)
         request_users = requests_with_users(route.route_name)
         origins_str = ""
@@ -74,7 +71,7 @@ def main():
         view_name = route.route.split(".")[-1]
         task_rendered = TASK_TEMPLATE.format(
             route=route,
-            commit=route.commit,
+            commit=route.route_commit,
             request_origins=origins_str or "* None!\n",
             date=date,
             rel_path=os.path.relpath(route.path, target_dir),
@@ -84,6 +81,7 @@ def main():
         print(task_rendered)
     else:
         routes_by_auth_type = get_routes_by_auth_type(all_routes)
+        routes_to_check = {}
         for auth_type, routes in routes_by_auth_type.items():
             if not parsed_args.show_safe and auth_type in SAFE_AUTH_TYPES:
                 continue
@@ -91,39 +89,12 @@ def main():
                 routes = filter(lambda x: not route_has_requests(x.route_name), routes)
             if not routes:
                 continue
-            repo = git.Repo(target_dir)
-            print("\n\nAuth Type: %s\n---------" % auth_type)
-            for route in routes:
-                # date = dt.datetime.fromtimestamp(route.commit.committed_date)
-                # if date < dt.datetime(year=2015, month=5, day=1):
-                #     continue
-                print(" - ".join((route.route, route.match, route.route_name)))
 
-                # TODO: Move this logic somewhere else...
-                db_route = find_route_by_route_name(route.route_name)
-                if not db_route:
-                    print("This route is new!")
-                    auth_commit = get_line_blame(repo, route.path, route.auth_lineno)
-                    diff = get_diff_from_commit(auth_commit)
-                    if diff:
-                        print("Introduced in: {}".format(diff))
+            routes_to_check[auth_type] = routes
 
-                    save_new_route(auth_type, route.route, route.match, route.route_name)
-                else:
-                    if auth_type != db_route.auth_type:
-                        # only alert if it's a more-bad route
-                        if cmp_auth_types(auth_type, db_route.auth_type) < 0:
-                            print('Auth type on route got worse! {} -> {}'.format(
-                                db_route.auth_type,
-                                auth_type,
-                            ))
-                            auth_commit = get_line_blame(repo, route.path, route.auth_lineno)
-                            diff = get_diff_from_commit(auth_commit)
-                            if diff:
-                                print("Changed with: {}".format(diff))
-                        with db_session() as session:
-                            db_route.auth_type = auth_type
-                            session.add(db_route)
+        print_routes(routes_to_check)
+        routes_to_report = check_routes_for_changes(routes_to_check, target_dir)
+        send_email(routes_to_report)
 
 
 if __name__ == "__main__":
