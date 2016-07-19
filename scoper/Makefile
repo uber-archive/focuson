@@ -73,3 +73,6 @@ requirements.txt requirements-test.txt: %.txt: %.in | env
 
 scoper.db: env/.requirements
 	env/bin/python setup-db.py
+
+cron: env/.requirements scoper.db
+	env/bin/python scoper.py ../api/
