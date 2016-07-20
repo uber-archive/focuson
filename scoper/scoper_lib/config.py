@@ -4,7 +4,7 @@ import os
 SG_USERNAME = os.environ.get('SG_USERNAME')
 SG_PASSWORD = os.environ.get('SG_PASSWORD')
 
-to_email = [
+TO_EMAIL = [
     'infosec-audit+scoper@uber.com',
 ]
-from_email = 'scoper@security.uber.com'
+FROM_EMAIL = 'scoper@security.uber.com'
