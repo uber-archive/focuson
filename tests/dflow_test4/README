@@ -1,0 +1,1 @@
+Test for taint flowing into sinks via **kwargs argument-passing

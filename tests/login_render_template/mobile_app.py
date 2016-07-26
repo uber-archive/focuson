@@ -42,5 +42,3 @@ def open_app():
 
 
     flask.render_template("open-app.html", android_deep_link=android_deep_link_collin, one=foo_one, two=foo_two)
-
-

@@ -33,5 +33,5 @@ def render_endorsement_landing(directed_referral_uuid):
 
     #render_template('endorsement.html', rt_arg_1)
 
-    #return render_template('endorsement.html', **template_vars)
-    return render_template('endorsement.html', collin_one)
+    return render_template('endorsement.html', **template_vars)
+    #return render_template('endorsement.html', collin_one)

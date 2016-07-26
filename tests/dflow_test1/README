@@ -1,0 +1,1 @@
+This is the most simple of the across function tests, all functions, all in same namespace, all in same file, only var1 = var2 style assignments inside those functions
