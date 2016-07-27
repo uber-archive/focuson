@@ -1,0 +1,10 @@
+This is the most complex test yet!
+
+It is a mini flask app that tests
+
+* dataflow across functions
+* dataflow across files
+* dataflow across classes/methods
+* imports
+
+It has its own venv you can use to run main.py to ensure it isn't broken code

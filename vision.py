@@ -199,7 +199,9 @@ class functionTaintInfo:
     This structure collects all the info we need to track tainting in/out/through a function
     """
     def __init__(self, name, ast=None):
+        # Name is the full keyname, should refactor to be more clear..
         self.name = name
+
         self.ast = ast
         # Root node = main() or app.route() node, its the entry point for execution, nothing calls it, it dominates other nodes
         self.is_root_node = None
@@ -222,6 +224,23 @@ class functionTaintInfo:
         self.pri_sinks = []
         self.pri_sources = []
 
+        # variable names that are instances of classes
+        # TODO trying out different naming here....
+        self.instance_names = []
+        # v = Object("asdf") the varname would be "v"
+        self.class_instance_varnames = []
+        # v = petTurtle("asd") the classname would be "petTurtle"
+        self.class_instance_classnames = []
+
+        self.class_pairs = {}
+
+        self.class_instances_lhs = []
+        self.class_instances_rhs = []
+        
+        # Some funcs are inside a class
+        self.class_name= None
+
+        self.funcname = None
         self.module = None
         self.fn = None
 
@@ -236,10 +255,12 @@ class dfaAnalysis:
         self.__fn_to_ast = {}
         self.__big_map = {}
         self.__template_dir = None
-        self.perform_jinja_analysis = True
+        self.perform_jinja_analysis = False
 
         self.verbose = True
         self.__detective_mode = True
+
+        self.METHOD_BLACKLIST = "format"
 
 
         self.uniq_modules = None 
@@ -418,6 +439,9 @@ class dfaAnalysis:
 
 
     def ingest(self, rootdir):
+        """
+        Collect all the .py files to perform analysis upon
+        """
         if not os.path.isdir(rootdir):
             raise Exception("directory %s passed in is not a dir" % rootdir)
         
@@ -432,6 +456,7 @@ class dfaAnalysis:
                     tree = ast.parse(contents)
                     self.__fn_to_ast[fullpath] = tree 
 
+        # potentially analyze .html files for jinja templates
         if self.perform_jinja_analysis:
             self.__template_dir = self.get_template_dir()
 
@@ -457,33 +482,93 @@ class dfaAnalysis:
         """
         if not self.__fn_to_ast.keys() > 0:
             raise Exception("No asts parsed from filenames to analyze")
+        
+        processed_class_methods = []
+
+        project_imports = {}
+
+        # Round 0 - Determine what each file imports 
+        for (fn, fn_ast) in self.__fn_to_ast.items():
+            # Note, if the same module is imported two different ways one entry
+            # will be overwritten. This is rare in real code but be aware
+            imports_for_fn = {}
+            for n in ast.walk(fn_ast):
+                if isinstance(n, ast.Import):
+                    for x in n.names:
+                        imports_for_fn[x.name] = None
+
+                if isinstance(n, ast.ImportFrom):
+                    names = [x.name for x in n.names]
+                    imports_for_fn[n.module] = names
+            project_imports[fn] = imports_for_fn
+
+        # print import map
+        #pp = pprint.PrettyPrinter(depth=6)
+        #pp.pprint(project_imports)
+
+        #fti.imports.keys() = "os urllib lib.lib_one.temporary_token"
+        #fti.imports['lib.lib_one.temporary_token'] returns "TemporaryToken foo bar"
+
+        # Round 1 - add all the class methods to the big map
+        for (fn, fn_ast) in self.__fn_to_ast.items():
+            for n in ast.walk(fn_ast):
+                if isinstance(n, ast.ClassDef):
+                    methods = [x for x in n.body if isinstance(x, ast.FunctionDef)]
+                    for m in methods:
+                        method_ast = m
+                        class_name = n.name
+
+                        modulename = self.gen_module_name(fn)
+                        (name, funcname) = self.gen_unique_key(modulename, method_ast.name, class_name)
+                        processed_class_methods.append(method_ast)
+
+                        fti = functionTaintInfo(name)
+                        fti.ast = method_ast
+                        fti.fn = fn
+                        fti.module = modulename
+                        fti.funcname = funcname
+                        fti.class_name = class_name
+                        self.__big_map[name] = fti
 
 
-        # Round 1 - get all the functionDefs in the big map
+
+        # Round 2 - add all the bare (not in a class) functions to the big map
         for (fn, fn_ast) in self.__fn_to_ast.items():
             for n in ast.walk(fn_ast):
                 if isinstance(n, ast.FunctionDef):
-                    name = self.gen_unique_name(fn, n)
+                    # It is critical we look at all functionDefs as some are not
+                    # part of a class but we already processed any of them inside
+                    # a class so skip those same ones heres
+                    if n in processed_class_methods:
+                        continue
+
+                    modulename = self.gen_module_name(fn)
+                    (name,  funcname) = self.gen_unique_key(modulename, n.name)
+                    #print 'funcdef case: ', name
+                    #print astpp.dump(n)
 
                     # Process this function and collect all the useful info for later
                     fti = functionTaintInfo(name)
                     fti.ast = n
                     fti.fn = fn
-                    fti.module = self.derive_module(fn)
+                    fti.module = modulename
+                    fti.funcname = funcname
                     self.__big_map[name] = fti
 
 
-        # All .py files are also modules that can be recorded
-        self.uniq_modules = list(set([self.key_to_modulename(x) for x in self.__big_map.keys()]))
 
-        print 'uniq modules.......', repr(self.uniq_modules)
+        # Round 2.5 - For each function record what modules it imports
+        # this sets the stage for us determining which fundef calls another funcdef later
+        for (name, fti) in self.__big_map.items():
+            fn = fti.fn
+            fti.imports = project_imports[fn]
 
 
-        # Round 2 - Find every Call() made in each function in big map
+        # Round 3 - Find every Call() made in each function in big map
         # For each Call(), resolve it to the right method in the big map
         for (name, fti) in self.__big_map.items():
             #print name, repr(fti)
-            fti.outgoing_calls = self.get_funcs_called(fti)
+            fti.outgoing_calls = self.get_outgoing_calls(fti)
 
         # Round 3 - for each function compute a list of all caller functions
         # This is why we should be using a graph, not a big dict... fast querying from either "side".
@@ -499,7 +584,7 @@ class dfaAnalysis:
                 self.__big_map[fn].incoming_calls.append(name)
 
         # Useful for debugging
-        print 'Who called me: '
+        print '\n\nWho called who: '
         pp = pprint.PrettyPrinter(depth=6)
         pp.pprint(who_called_me)
 
@@ -530,7 +615,7 @@ class dfaAnalysis:
         #bottom-taint (sinks), top-taint (sources)
         initial_sink_tainted_funcs = [k for (k,v) in self.__big_map.items() if v.has_pri_sink == True]
         if self.__detective_mode:
-            print '%d functions containing an initial sink' % len(initial_sink_tainted_funcs)
+            print '\n\n%d functions containing an initial sink' % len(initial_sink_tainted_funcs)
 
 
         if self.perform_jinja_analysis:
@@ -543,164 +628,233 @@ class dfaAnalysis:
         self.walkup(initial_sink_tainted_funcs, self.LIST_OF_SINKS)
 
 
+    def parse_call(self, n):
+        #print '\tparsing a call...'
+        #print astpp.dump(n)
 
-    def extract_varname(self, sinkvar):
-        return sinkvar.id
+        func_name = None
+        arg_offset_pairs = []
 
-    def far_taint_analysis(self, cf_key, incoming_sinks):
-        """ The workhouse
-        This does two main things
-            1. Runs the rules against a Call() instance to surface bugs
-            2. what #2 says below....... fix this up when less tired. Point is it does two big seperate things
+        # A some_lib.foo() type Call
+        if isinstance(n.func, ast.Attribute):
+            if hasattr(n.func.value, "id") and hasattr(n.func, "attr"):
+                #print n.func.value.id
+                #print s.module
+                #print n.func.attr
+                #print s.name
+                #print astpp.dump(n.func)
 
-        given a function (cf) and a global list of sinks determine:
-            1. Do any of my, cf, sources flow to any of these sinks? If so, bug
-            2. Do I permit transitive taint flow from my arguments to any of these sinks? if so I BECOME a sink for the next round
+                func_name = n.func.attr
+                if len(n.args) > 0:
+                    for a in n.args:
+                        if isinstance(a, ast.Name):
+                            i = n.args.index(a)
+                            p = (a.id, i)
+                            arg_offset_pairs.append(p)
 
-        We would expect the contents of incoming_sinks to be extend_home_contract(),
-        mysql_query() and similar AND randomFunc2() that is is trainsitively tainted from previous rounds
+        return func_name, arg_offset_pairs
 
+    def collect_sinky_varnames(self, incoming_sinks, cf):
+        """
+        Return all the variable names from within in this function (cf) 
+        that are passed to a dangerous sink at a dangerous offset. 
+
+        These variable names are later exploded to find the maximum set of
+        variables like this. 
+
+        # NEW WORLD ORDER COMMENT - all this code does is:
+        # 1. find the variable names that are passed into a sink, at a specific offset. 
+        #  if we find such a variable name record it and return it for further processing
+        # This is made hard as arguments to a function can be bare variables, dicts, etc so most of 
+        # the effort here is parsing those variations to deliver one, or potentially a set, of bare variable names
+        # like ["foo", "blah"] that we are certain are function-local (bb-local) variables that make it into a dangerous sink in a dangerous
+        # "slot". The "slot" is represented by an arg_offset which is just the position of the argument. 
+        # ex:
+        # sink(a, b, c) and only an argument in c is vulnerable
+        # blah = "asdf"
+        # sink(42, "foo", blah) -> returns ("blah", 2)
         """
 
-        cf = self.__big_map[cf_key]
+        tainted_vars = []
+        for s in incoming_sinks:
+            # Get the function-scoped variable name of the argument to our sink
+            for n in ast.walk(cf.ast):
+                if isinstance(n, ast.Call):
+                    func_name, arg_offset_pairs = self.parse_call(n)
+
+                    if func_name == s.name and len(arg_offset_pairs) > 0:
+                        #tainted_vars.append(args_into_func[offset])
+                        #print "\t\t", func_name + "()"
+                        #print "\t\t so->", s.arg_offset
+                        for (arg_into_func, arg_offset) in arg_offset_pairs:
+                            #print "\t\t", arg_into_func
+                            #print "\t\t", arg_offset
+                            if arg_offset == s.arg_offset:
+                                tainted_vars.append(arg_into_func)
+
+                    if isinstance(n.func, ast.Name) and hasattr(n.func, "id") and n.func.id == s.name:
+                        if not hasattr(n, "args"):
+                            continue
+                        if not len(n.args) > 0:
+                            continue
+
+                        sinkvar = n.args[s.arg_offset]
+
+                        if isinstance(sinkvar, ast.Name):
+                            tainted_vars.append(sinkvar.id)
+
+                        elif isinstance(sinkvar, ast.Dict):
+                            for k in sinkvar.keys:
+                                i = sinkvar.keys.index(k)
+                                v = sinkvar.values[i]
+                                if isinstance(v, ast.Name):
+                                    # We can comprehend this, its a varname as a value in a dict, taint it
+                                    tainted_vars.append(v.id)
         
-        if not cf:
-            return
 
-        # Collect the argument names to this function
-        assert isinstance(cf.ast, ast.FunctionDef)
-        args = []
-        for arg in cf.ast.args.args:
-            arg_name = arg.id
-            args.append(arg_name)
+            return tainted_vars
 
-        #print 'round -o- far taint analysis.....'
-        #print astpp.dump(cf.ast)
-        #print 'all incoming sinks: %s' % repr(incoming_sinks)
+    def get_functions_args(self, cf):
+        """
+        Collect the argument names to this function
+        """
+        args = [arg.id for arg in cf.ast.args.args]
 
+        # if this method is in a class its first argument will be "self"
+        if args.count("self") > 0:
+            i = args.index("self")
+            del args[i]
+        return args
+
+
+
+    def far_taint_analysis(self, cf_key, incoming_sinks):
+        """ 
+        cf = current function
+        incoming_sinks = a set of tainted sinks to check against
+
+        Determine if:
+         1. Any of cf's sources flow to any of these sinks. If so, bug.
+         2. Any of cf's arguments flow to any of these sinks. If so, Im tainted.
+            In this case I BECOME a sink for the next round. 
+
+
+        We do this in stages 
+        1. Find args to incoming_sinks 
+        2. Find assignments to those args
+        3. Find any args to cf itself that flow to those assignments
+
+        Some of this may look unintuitive because this is bottoms-up analysis
+
+        We would expect the contents of incoming_sinks to be things like
+        extend_home_contract()/mysql_query()/etc AND randomFunc2() that is 
+        transitively tainted from previous rounds.
+
+        """
         # A few stages here
         # 1. Find all matching sinks + args to those sinks, the name of one of those is sinkvar
         # 2. Given that variable look through assigns to propagate taint upwards from sinkvar
         # 3. With the full set of tainted variables in this function, see if the functions 
         #   arguments itself flow ultimately to that tainted sink. If they do, mark function transitively tainted!
-        sl = []
-        for s in incoming_sinks:
-            # Get the function-scoped variable name of the argument to our sink
-            tainted_vars = []
-            for n in ast.walk(cf.ast):
-                if isinstance(n, ast.Call):
 
-                    # A Call() like some_lib.foo()
-                    if isinstance(n.func, ast.Attribute):
-                        if hasattr(n.func.value, "id") and hasattr(n.func, "attr"):
-                            #print '\nwhoooooooooooooooooooooooooooh nelly'
-                            #print astpp.dump(n.func)
-                            if n.func.value.id == s.module and n.func.attr == s.name:
-                                # TODO copy what we have below, this case should handle dict/Name just as easily... just testing one case for now...
-                                if isinstance(n.args[0], ast.Name):
-                                    sinkvar = n.args[0].id
-                                    tainted_vars.append(sinkvar)
 
-                        
-                        #value=Call(func=Attribute(value=Name(id='some_lib', ctx=Load()), attr='far_out', ctx=Load()), args=[
-                        #Name(id='var_y', ctx=Load()), ], keywords=[], starargs=None, kwargs=None)),
-
-                    # A Call() like foo() (assumes in the same file/module scope)
-                    if isinstance(n.func, ast.Name) and hasattr(n.func, "id") and n.func.id == s.name:
-
-                        # This is the meaty part. Some sinks have  fullblown rule inside it.
-                        # The rule is the authority on the set of variables that are tainted in this
-                        # specific instance of a sink-matching Call(). Other sinks are simpler 
-                        # and are only a name and an argument into a Call() of that name
-                        if hasattr(s, "rule") and s.rule:
-                            L = s.rule(n, s.arg_offset)
-                            # TODO refactor... shouldn't need to pass the arg_offset into itself...
-                            for x in L:
-                                tainted_vars.append(x)
-                        else:
-                            if not hasattr(n, "args"):
-                                continue
-                            if not len(n.args) > 0:
-                                continue
-
-                            sinkvar = n.args[s.arg_offset]
-                            if isinstance(sinkvar, ast.Name):
-                                tainted_vars.append(sinkvar.id)
-                            elif isinstance(sinkvar, ast.Dict):
-                                for k in sinkvar.keys:
-                                    i = sinkvar.keys.index(k)
-                                    v = sinkvar.values[i]
-                                    if isinstance(v, ast.Name):
-                                        # We can comprehend this, its a varname as a value in a dict, taint it
-                                        tainted_vars.append(v.id)
+        cf = self.__big_map[cf_key]
+        print '\n\ncf: ', cf_key
+        print '\tcf.callers: ', cf.incoming_calls
         
+        if not cf:
+            return
+
+        assert isinstance(cf.ast, ast.FunctionDef)
+
+        #print astpp.dump(cf.ast)
+        print '\tcf incoming tainted sinks: %s' % repr(incoming_sinks)
 
 
-            # At this stage tainted_vars are all ast.Names or ast.Dicts etc so extract the actual variable names
+        # The set of sinks to investigate in the next round. If we are 
+        # transitively tainted this will include us. 
+        outgoing_sinks = []
 
-            #print '\n'
-            #print '..... tghe tainted vars inside.......'
-            #for x in tainted_vars:
-            #    print '-' * 80
-            #    if isinstance(x, str):
-            #        print x
+        tainted_vars = []
+        tainted_vars = self.collect_sinky_varnames(incoming_sinks, cf)
+
+        #for s in incoming_sinks:
 
 
-            # Look at all assigns to determine if an argument to this function flows to the sinks arguments
-            if tainted_vars:
-                assigns = []
+        # At this stage tainted_vars are all ast.Names or ast.Dicts etc so extract the actual variable names
 
-                # Collect list of assigns
-                for n in ast.walk(cf.ast):
-                    if isinstance(n, ast.Assign):
-                        if not hasattr(n.targets[0], "id") or not hasattr(n.value, "id"):
-                            continue
-                        (lhs, rhs) = (n.targets[0].id, n.value.id)
-                        assigns.append((lhs, rhs))
-         
-                # if we have 8 assigns we need to do 8*8 rounds through loop to 
-                # ensure the assignment taint correctly propagated
-                for x in range(len(assigns)):
-                    for (lhs, rhs) in assigns:
-                        if lhs in tainted_vars:
-                            tainted_vars.append(rhs)
+        #print '\n'
+        #print '..... tghe tainted vars inside.......'
+        #for x in tainted_vars:
+        #    print '-' * 80
+        #    if isinstance(x, str):
+        #        print x
 
-                # The full unique set of tainted vars
-                tainted_vars = list(set(tainted_vars))
-                
 
-                if self.__detective_mode:
-                    print "%s sinks: %s tained vars: %s" % (cf.name, repr(incoming_sinks), repr(tainted_vars))
+        # Look at all assigns to determine if an argument to this function flows to the sinks arguments
+        if tainted_vars:
+            print '\t [1]tainted vars inside cf: ', repr(tainted_vars)
+            assigns = []
 
-                # If there are any sources in this function, we have a bug!
-                matches = []
-                matches = self.find_tainted_sources(cf, tainted_vars)
-                if matches:
-                    self.file_bug(cf, matches)
+            # Collect list of assigns
+            for n in ast.walk(cf.ast):
+                if isinstance(n, ast.Assign):
+                    if not hasattr(n.targets[0], "id") or not hasattr(n.value, "id"):
+                        continue
+                    (lhs, rhs) = (n.targets[0].id, n.value.id)
+                    assigns.append((lhs, rhs))
+     
+            print '\t cf assigns..........', repr(assigns)
 
-                # Mark ourselves as a dangerous sink if we propagate taint from our args to a sink
-                # We now have the full set of tainted vars inside this function that flow to the sink
-                # compare these to the functions arguments to know what calls into *this* function 
-                overlap = set(tainted_vars).intersection(set(args))
-                for targ in list(overlap):
-                    targ_offset = args.index(targ)
-                    s = sink(cf.ast.name, targ_offset)
-                    s.module = self.derive_module(cf.fn)
-                    # deep magic, make better ^
+            # if we have 8 assigns we need to do 8*8 rounds through loop to 
+            # ensure the assignment taint correctly propagated.
+            # This looks unintuitive because we propagate taint bottom up
+            for x in range(len(assigns)):
+                for (lhs, rhs) in assigns:
+                    if lhs in tainted_vars:
+                        tainted_vars.append(rhs)
 
-                    sl.append(s)
-                    # We know cf propagates taint transitively, mark that
-                    self.__big_map[cf_key].ttaint = True
+            # The full unique set of tainted vars
+            tainted_vars = list(set(tainted_vars))
+            
+            
+            print '\t [2]tainted vars inside cf: ', repr(tainted_vars)
+            #print "===========> %s sinks: %s tainted vars: %s" % (cf.name, repr(incoming_sinks), repr(tainted_vars))
+
+            # If there are any sources in this function, we have a bug!
+            matches = []
+            matches = self.find_tainted_sources(cf, tainted_vars)
+            if matches:
+                self.file_bug(cf, matches)
+
+            # Mark ourselves as a dangerous sink if we propagate taint from our args to a sink
+            # We now have the full set of tainted vars inside this function that flow to the sink
+            # compare these to the functions arguments to know what calls into *this* function 
+            args = self.get_functions_args(cf)
+            overlap = set(tainted_vars).intersection(set(args))
+            print '\tcf args of mine that flow to tainted sinks:', repr(overlap)
+            for targ in list(overlap):
+                targ_offset = args.index(targ)
+                s = sink(cf.ast.name, targ_offset)
+
+                print '\t ginning a new sink........', repr(s)
+
+                outgoing_sinks.append(s)
+                # We know cf propagates taint, mark that
+                self.__big_map[cf_key].ttaint = True
 
 
         # We can conclude I, cf, am trainsitively tainted so return my callers
         # to be recursively investigated as I was
         if self.__big_map[cf_key].ttaint:
-            print '\tttainted', repr(cf.incoming_calls)
-            print repr(sl)
-            return cf.incoming_calls, sl
+            return cf.incoming_calls, outgoing_sinks
         else:
-            return [], sl
+            return [], outgoing_sinks
+
+
+
+
+
 
     def find_tainted_sources(self, cf, sink_tainted_vars):
         matches = []
@@ -821,6 +975,13 @@ class dfaAnalysis:
 
             #print "\n Incoming f: %s sinks: %s" % (cf.name, repr(sink_list))
             funcs_to_check_out, sinks_to_consider = self.far_taint_analysis(cf_key, sink_list)
+            # tainted_vns = 
+            # results.append(run_rules(cf, tainted_vns))
+            # is_cf_ttainted = determine_ttainted(tainted_vns) -> inside it looks at args to function and assignments
+            # if is_cf_ttainted:
+            #   funcs_to_check_out = cf.incoming_calls
+            # sinks_to_consider = full_existing_set_of_sinks + cf_as_a_sink
+
             #print "\toutgoing f: %s sinks: %s" % (repr(funcs_to_check_out), repr(sinks_to_consider))
             self.walkup(funcs_to_check_out, sinks_to_consider)
 
@@ -937,73 +1098,301 @@ class dfaAnalysis:
             return s
 
 
+    def wrangle_classname_from_call(self, n):
 
-    def get_funcs_called(self, fti):
+        #print 'wrangling.........'
+        #print astpp.dump(n)
+        if isinstance(n, ast.Name):
+            return n.id
+        if isinstance(n, ast.Attribute):
+            return None
+            # ugggghhh, no "correct" answer here. 
+            # Need to spend time teasing out all the variations here but start with the above to progress for now
+            #return n.value.id
+            #Examples of one that breaks
+            #<_ast.Call object at 0x10d819ed0>
+            #wrangling.........
+            #Attribute(value=Attribute(value=Name(id='request', ctx=Load()), attr='args', ctx=Load()), attr='get', ctx=Load())
+        """
+        Two examples
+        Call(func=Attribute(value=Name(id='flask', ctx=Load()), attr='Flask', ctx=Load()), args=[
+            Name(id='__name__', ctx=Load()),
+          ], keywords=[], starargs=None, kwargs=None)
+
+        Call(func=Name(id='TemporaryToken', ctx=Load()), args=[
+            Name(id='user', ctx=Load()),
+          ], keywords=[], starargs=None, kwargs=None)
+        """
+
+    def get_outgoing_calls(self, fti):
         """ 
         Given a function, f1 determine all the other functions f1 calls.
         Return all those functions to be used later for taint propagation
-        """
-        assert type(fti.ast) == ast.FunctionDef
 
-        L = []
+        Determining what code is being called in a situation is hard. 
+        So we guess. The cases we expect to see are:
+        1. foo() - easiest.calling the foo function inside the existing module
+            made trickier becacuse it can happen anywhere like as part
+            of an assign or a return or inside a dict etc
+
+        2. dog.bark() - could be the dog class, could be the dog module
+            
+        3. (probably other cases)
+        
+        The outgoing_calls list is what to pay attention to, everything boils
+        down to adding entries to it where each entry is a key in the big map.
+        """
+
+        assert type(fti.ast) == ast.FunctionDef
+        #print 'Figuring out calls for ', fti.name
+
+        #source = codegen.to_source(fti.ast)
+
+
+        # Step 1 - collect all the places where we instantiate a class and assign it to a variable
+        # This so later we can untangle what actual code a Call() points to
+        instancenames_inside_func = []
+        classes_instantiated_inside_func = []
+        for n in ast.walk(fti.ast):
+            if isinstance(n, ast.Assign):
+                if isinstance(n.value, ast.Call):
+
+                    lhs = n.targets[0]
+                    if not isinstance(lhs, ast.Name):
+                        continue
+                        #raise("this is strange...")
+
+                    instancename = lhs.id
+                    # ex: token = TempToken(blah), append "token" so we 
+                    # know that it is actually an instance of a class and
+                    # not a "normal" variable.
+                    instancenames_inside_func.append(instancename)
+
+                    # Can be a name or an attr... decipher...
+                    class_name = self.wrangle_classname_from_call(n.value.func)
+                    classes_instantiated_inside_func.append(class_name)
+                    fti.class_pairs[instancename] = class_name
+
+        fti.class_instance_varnames = instancenames_inside_func 
+        fti.class_instance_classnames = classes_instantiated_inside_func
+
+
+
+
+        # Step 2 - analyze all the Call()s
+        # Handle all the different forms, function call, a call to a method on a class, etc
+        outgoing_calls = []
         for n in ast.walk(fti.ast):
             if isinstance(n, ast.Call):
-                #print '\ndetermining if this is a caller........'
-                #print astpp.dump(n)
 
-
-                # Parse the Call() spot to get a reasonable function name out of it
-                # A few different forms, function call, a call to a method on a class, etc
-
-                # Calls() are often Names or Attribute notes
-                funcname = None
+                # Calls() are often Names or Attribute nodes and Names are
+                # the easier of the cases.
                 if isinstance(n.func, ast.Name):
                     funcname = n.func.id
-                if isinstance(n.func, ast.Attribute):
+                    print 'Call(easy).......', repr(funcname)
 
-                    # The trickiest case
-                    if hasattr(n.func.value, "id"):
-                        # handle the someimportedfile.funcname case via a fuzzy match
-                        funcname = self.handle_outfile_calls(n, fti)
-
-                        # HACK for now... need to rewrite function mapping below to account for files/classes/etc... but skipping for now
-                        if funcname:
-                            L.append(funcname)
+                    # A big blacklist of functions that if there is a Call() instance to, we dont care
+                    # This is for things we know are safe or happen often and are likely safe
+                    # Currently this is mostly _ (translation function) and things prefaced with test_
+                    if funcname == "_" or funcname.startswith("test_"):
                         continue
-                    else:
-                        # This triggers for cases of "somestring".format(blah) the format() Call() is being processed
-                        # safe to ignore I believe 
-                        if n.func.attr == "format":
-                            continue
 
-                # We cannot determine a name for this Call() instance
-                if not funcname:
-                    continue
-    
-                # A big blacklist of functions that if there is a Call() instance to, we dont care
-                # This is for things we know are safe or happen often and are likely safe
-                # Currently this is mostly _ (translation function) and things prefaced with test_
-                if funcname == "_" or funcname.startswith("test_"):
-                    continue
+                    # This is *really* permissive, if anywhere in the project we find a function
+                    # named the same as one we call, toss it in. 
+                    for k,v in self.__big_map.items():
+                        if funcname == v.funcname:
+                            outgoing_calls.append(k)
 
-                k = self.__big_map.keys()
-                for k in self.__big_map.keys():
-                    (filename_from_map, funcname_from_map) = k.split("::")
-                    #print '\t compare-> ' + funcname, funcname_from_map
-                    if funcname == funcname_from_map:
-                        L.append(k)
-        #print "all Calls() in function %s are: " % fti.name, repr(L)
-        return L
 
- 
 
-    def gen_unique_name(self, fn, n):
-        subfn = fn[len(self.__target_dir) :]
+                """ 
+                The hard case
+                Could be class.method(), could be module.func()
+                could even be self.func()
+                """
+                if isinstance(n.func, ast.Attribute):
+                    if hasattr(n.func.value, "id"):
+                        print 'Call(hard)........',repr(n.func.value.id)
 
-        # This should be file.py::module::class:function or similar to be explicit and unique
-        unique_name = subfn + "::" + n.name
-        return unique_name
+                        # Technically this is a method or a func name and we
+                        # are not yet sure which one. 
+                        method_name = n.func.attr
+                        print method_name
 
+                        """
+                        The lefthand side of a call.
+                        For the class.method() for ex:
+                         l2 = someClass(); l2.someMethod()
+                        For the module.func() case for ex:
+                         somelib.far_out()
+                        lhs = "l2" in the first and "somelib" in the second
+                        """
+                        lhs = n.func.value.id
+
+                        # self.someFunc() case so  use the class within which this function lives
+                        if lhs == "self":
+                            key = self.get_key_from_info(method_name, fti.class_name)
+                            if self.__big_map.has_key(key):
+                                outgoing_calls.append(key)
+                        
+                        # Next check the class.method() scenario.
+                        if lhs in fti.class_instance_varnames:
+                            class_of_varname = fti.class_pairs[lhs]
+
+
+                            if method_name in self.METHOD_BLACKLIST:
+                                continue
+
+                            if class_of_varname and method_name:
+                                # make this a func that returns a key into the big map given some info about
+                                # a function/class/method/etc
+                                key = self.get_key_from_info(method_name, class_of_varname)
+
+                                # TODO get this working instead of above, its more elegant......
+                                #(key, _) = self.gen_unique_key(fti.fn, method_name, class_of_varname)
+                                #print 'genned key......', key
+                                if self.__big_map.has_key(key):
+                                    outgoing_calls.append(key)
+
+                        # Wasn't class.method() so assume module.func() case
+                        else:
+                            module_name = lhs
+                            # Assuming its an imported module, ensure its in import list for this function 
+                            if fti.imports.has_key(module_name):
+                                (key, _) = self.gen_unique_key(module_name, method_name)
+                                if self.__big_map.has_key(key):
+                                    outgoing_calls.append(key)
+
+
+        if len(outgoing_calls) > 0:
+            #print 'I, %s call these funcs: %s' % (fti.name, repr(outgoing_calls))
+            pass
+
+        return outgoing_calls 
+
+    def get_key_from_info(self, funcname, class_name=None):
+        """ Given some info return a key into the Big Map
+            This is its own func because it at least encapsulates the lameness of
+            iterating through everything to get a key. This could/should be refactored into 
+            gen_module_name() most likely...
+        """
+        for k,v in self.__big_map.items():
+            if v.class_name == class_name and v.funcname == funcname:
+                return k
+
+
+    def get_fn_from_call(self, fti):
+        L = []
+
+        # Step 2 - analyze all the Call()s
+        # Handle all the different forms, function call, a call to a method on a class, etc
+        outgoing_calls = []
+        for n in ast.walk(fti.ast):
+            if isinstance(n, ast.Call):
+
+                # Calls() are often Names or Attribute nodes
+                # Names are generally the easier of the two
+                if isinstance(n.func, ast.Name):
+                    funcname = n.func.id
+                    #print 'Call(easy).......', repr(funcname)
+
+                    # A big blacklist of functions that if there is a Call() instance to, we dont care
+                    # This is for things we know are safe or happen often and are likely safe
+                    # Currently this is mostly _ (translation function) and things prefaced with test_
+                    if funcname == "_" or funcname.startswith("test_"):
+                        continue
+
+                    # This is *really* permissive, if anywhere in the project we find a function
+                    # named the same as one we call, toss it in. 
+                    for k,v in self.__big_map.items():
+                        if funcname == v.funcname:
+                            outgoing_calls.append(k)
+
+
+
+                # The trickiest case
+                if isinstance(n.func, ast.Attribute):
+                    if hasattr(n.func.value, "id"):
+                        #print 'Call(hard)........',repr(n.func.value.id)
+
+                        # l2 = someClass(); l2.someMethod()
+                        # lhs_instance_vn = "l2"
+                        lhs_instance_vn = n.func.value.id
+
+                        # Case of "self.someFunc()" calls the lhs will be "self"
+                        # so use the class within which this function lives
+                        if lhs_instance_vn == "self":
+                            method_name = n.func.attr
+                            key = self.get_key_from_info(method_name, fti.class_name)
+                            if self.__big_map.has_key(key):
+                                outgoing_calls.append(key)
+
+                        if lhs_instance_vn in fti.class_instance_varnames:
+                            class_of_varname = fti.class_pairs[lhs_instance_vn]
+                            # We now have the class whose method we are calling
+                            # Look it up in the big map so we can link these
+
+                            method_name = n.func.attr
+
+                            if method_name in self.METHOD_BLACKLIST:
+                                continue
+
+                            if class_of_varname and method_name:
+                                # make this a func that returns a key into the big map given some info about
+                                # a function/class/method/etc
+                                key = self.get_key_from_info(method_name, class_of_varname)
+
+                                # TODO get this working instead of above, its more elegant......
+                                #(key, _) = self.gen_unique_key(fti.fn, method_name, class_of_varname)
+                                #print 'genned key......', key
+                                if self.__big_map.has_key(key):
+                                    outgoing_calls.append(key)
+
+
+
+    def gen_module_name(self, python_filename):
+        """ Given a filename return the module it constitutes
+        """
+
+        # Base dir is relevant because the directory structure determines the modulenames
+        base_dir = self.__target_dir
+
+        # Determine modulename based on file path and make it module-y
+        subfn = python_filename[len(base_dir) :]
+        subfn = subfn.replace(os.sep, ".")
+        if subfn[0:1] == ".":
+            subfn = subfn[1:]
+        if subfn.endswith(".py"):
+            subfn = subfn[:-3]
+        module_name = subfn
+
+        return module_name
+
+
+
+    def gen_unique_key(self, module_name, funcname, class_name=None):
+        """
+        Generate a unique key to used for an fti in the big map
+        Format is: module::(optional class)::function
+
+        base_dir/lib/lib_one/token.py
+            def foo():
+        Becomes: lib.lib_one.token::foo
+        
+        base_dir/lib/lib_one/turtle.py
+            class box:
+                def chomp():
+        Becomes: lib.lib_one.turtle::box::chomp
+
+        """
+        unique_name = None
+
+        if class_name:
+            unique_name = module_name + "::" + class_name + "::" + funcname
+        elif not class_name:
+            unique_name = module_name + "::" + funcname
+
+        return (unique_name, funcname)
 
 
     def consume_dir_compile_templates(self, template_dir = None):
