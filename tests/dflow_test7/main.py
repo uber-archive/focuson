@@ -46,7 +46,7 @@ def main_alt_2():
 
 def second(arg1, arg2):
     arg_vuln = request.args.get('foo')
-    #now_tainted = arg_vuln
+    now_tainted = arg_vuln
     #now_tainted = arg1
     now_also_tainted = now_tainted
     user = "asd"

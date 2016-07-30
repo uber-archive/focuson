@@ -257,7 +257,7 @@ class dfaAnalysis:
         self.__template_dir = None
         self.perform_jinja_analysis = False
 
-        self.verbose = True
+        self.verbose = False 
         self.__detective_mode = True
 
         self.METHOD_BLACKLIST = "format"
@@ -267,6 +267,9 @@ class dfaAnalysis:
         self.tside_unsafe_tn_to_vars = {}
 
         ehc_sink = sink("extend_home_context", 0)
+        esc_sink = sink("extend_signup_context", 0)
+        # make one for extend_signup_context
+        # make one for templated() which is the same as extend_home_context...
         rt_sink = sink("render_template", 1)
         # TODO - a flask.render_template() sink and test
         #rt_sink.kwarg_handler = self.rt_sink_kwarg_handler_func
@@ -277,6 +280,7 @@ class dfaAnalysis:
         # TODO, could there be multiple rules attached to a sink? web-p2..login..api..etc? all need to handle render_template for instance...
         self.LIST_OF_SINKS = [
             ehc_sink,
+            esc_sink,
             rt_sink,
             ]
  
@@ -584,9 +588,9 @@ class dfaAnalysis:
                 self.__big_map[fn].incoming_calls.append(name)
 
         # Useful for debugging
-        print '\n\nWho called who: '
-        pp = pprint.PrettyPrinter(depth=6)
-        pp.pprint(who_called_me)
+        #print '\n\nWho called who: '
+        #pp = pprint.PrettyPrinter(depth=6)
+        #pp.pprint(who_called_me)
 
         
         # Round 3 - foreach function see if its body contains any known
@@ -627,6 +631,13 @@ class dfaAnalysis:
             # maybe .....
         self.walkup(initial_sink_tainted_funcs, self.LIST_OF_SINKS)
 
+        if self.__detective_mode:
+            ttainted_funcs = [v.funcname for (k,v) in self.__big_map.items() if v.ttaint == True]
+            not_ttainted_funcs = [v.funcname for (k,v) in self.__big_map.items() if v.ttaint == False]
+            print "%d functions analyzed" % len(self.__big_map.keys())
+            print "%d ttainted: %s " % (len(ttainted_funcs), repr(ttainted_funcs))
+            #print "%d not ttainted: %s" % (len(not_ttainted_funcs), repr(not_ttainted_funcs))
+
 
     def parse_call(self, n):
         #print '\tparsing a call...'
@@ -656,23 +667,24 @@ class dfaAnalysis:
 
     def collect_sinky_varnames(self, incoming_sinks, cf):
         """
-        Return all the variable names from within in this function (cf) 
+        Return all the variable names from within this function (cf) 
         that are passed to a dangerous sink at a dangerous offset. 
 
         These variable names are later exploded to find the maximum set of
-        variables like this. 
+        variables like this possible via assignments.
 
-        # NEW WORLD ORDER COMMENT - all this code does is:
-        # 1. find the variable names that are passed into a sink, at a specific offset. 
-        #  if we find such a variable name record it and return it for further processing
-        # This is made hard as arguments to a function can be bare variables, dicts, etc so most of 
-        # the effort here is parsing those variations to deliver one, or potentially a set, of bare variable names
-        # like ["foo", "blah"] that we are certain are function-local (bb-local) variables that make it into a dangerous sink in a dangerous
-        # "slot". The "slot" is represented by an arg_offset which is just the position of the argument. 
-        # ex:
-        # sink(a, b, c) and only an argument in c is vulnerable
-        # blah = "asdf"
-        # sink(42, "foo", blah) -> returns ("blah", 2)
+        All this code does is:
+        find the variable names that are passed into a sink, at a specific offset. 
+        If we find such a variable name record it and return it for further processing
+
+        This is made hard as arguments to a function can be bare variables, dicts, etc so most of 
+        the effort here is parsing those variations to deliver one, or potentially a set, of bare variable names
+        like ["foo", "blah"] that we are certain are function-local (bb-local) variables that make it into a dangerous sink in a dangerous
+        "slot". The "slot" is represented by an arg_offset which is just the position of the argument. 
+        ex:
+         sink(a, b, c) and only an argument in c is vulnerable
+         blah = "asdf"
+         sink(42, "foo", blah) -> returns ("blah", 2)
         """
 
         tainted_vars = []
@@ -680,7 +692,10 @@ class dfaAnalysis:
             # Get the function-scoped variable name of the argument to our sink
             for n in ast.walk(cf.ast):
                 if isinstance(n, ast.Call):
+                    # First try parsing as some_lib.foo()
+                    # TODO rename and possible remove this... see down below where we handle lots of cases
                     func_name, arg_offset_pairs = self.parse_call(n)
+
 
                     if func_name == s.name and len(arg_offset_pairs) > 0:
                         #tainted_vars.append(args_into_func[offset])
@@ -692,13 +707,29 @@ class dfaAnalysis:
                             if arg_offset == s.arg_offset:
                                 tainted_vars.append(arg_into_func)
 
+                    elif func_name == None:
+                        #func_name, arg_offset_pairs = self.parse_as_other_case()
+                        pass
+                        
+
+
                     if isinstance(n.func, ast.Name) and hasattr(n.func, "id") and n.func.id == s.name:
+
                         if not hasattr(n, "args"):
                             continue
                         if not len(n.args) > 0:
                             continue
 
-                        sinkvar = n.args[s.arg_offset]
+                        try:
+                            sinkvar = n.args[s.arg_offset]
+                        except IndexError:
+                            # Weird case, we have a sink and an offset and the
+                            # case of that sink we found doesn't fit that
+                            # argument pattern, just continue
+                            # Seen this happen with render_template(var)
+                            # where we instead expect render_template("blah/foo.html", var)
+                            continue
+
 
                         if isinstance(sinkvar, ast.Name):
                             tainted_vars.append(sinkvar.id)
@@ -712,7 +743,7 @@ class dfaAnalysis:
                                     tainted_vars.append(v.id)
         
 
-            return tainted_vars
+        return tainted_vars
 
     def get_functions_args(self, cf):
         """
@@ -759,8 +790,9 @@ class dfaAnalysis:
 
 
         cf = self.__big_map[cf_key]
-        print '\n\ncf: ', cf_key
-        print '\tcf.callers: ', cf.incoming_calls
+        if self.verbose:
+            print '\n\ncf: ', cf_key
+            print '\tcf.callers: ', cf.incoming_calls
         
         if not cf:
             return
@@ -768,7 +800,7 @@ class dfaAnalysis:
         assert isinstance(cf.ast, ast.FunctionDef)
 
         #print astpp.dump(cf.ast)
-        print '\tcf incoming tainted sinks: %s' % repr(incoming_sinks)
+        #print '\tcf incoming tainted sinks: %s' % repr(incoming_sinks)
 
 
         # The set of sinks to investigate in the next round. If we are 
@@ -778,7 +810,6 @@ class dfaAnalysis:
         tainted_vars = []
         tainted_vars = self.collect_sinky_varnames(incoming_sinks, cf)
 
-        #for s in incoming_sinks:
 
 
         # At this stage tainted_vars are all ast.Names or ast.Dicts etc so extract the actual variable names
@@ -793,8 +824,9 @@ class dfaAnalysis:
 
         # Look at all assigns to determine if an argument to this function flows to the sinks arguments
         if tainted_vars:
-            print '\t [1]tainted vars inside cf: ', repr(tainted_vars)
             assigns = []
+            if self.verbose:
+                print '\t [1]tainted vars inside cf: ', repr(tainted_vars)
 
             # Collect list of assigns
             for n in ast.walk(cf.ast):
@@ -804,7 +836,7 @@ class dfaAnalysis:
                     (lhs, rhs) = (n.targets[0].id, n.value.id)
                     assigns.append((lhs, rhs))
      
-            print '\t cf assigns..........', repr(assigns)
+            #print '\t cf assigns..........', repr(assigns)
 
             # if we have 8 assigns we need to do 8*8 rounds through loop to 
             # ensure the assignment taint correctly propagated.
@@ -817,8 +849,8 @@ class dfaAnalysis:
             # The full unique set of tainted vars
             tainted_vars = list(set(tainted_vars))
             
-            
-            print '\t [2]tainted vars inside cf: ', repr(tainted_vars)
+            if self.verbose: 
+                print '\t [2]tainted vars inside cf: ', repr(tainted_vars)
             #print "===========> %s sinks: %s tainted vars: %s" % (cf.name, repr(incoming_sinks), repr(tainted_vars))
 
             # If there are any sources in this function, we have a bug!
@@ -832,16 +864,19 @@ class dfaAnalysis:
             # compare these to the functions arguments to know what calls into *this* function 
             args = self.get_functions_args(cf)
             overlap = set(tainted_vars).intersection(set(args))
-            print '\tcf args of mine that flow to tainted sinks:', repr(overlap)
-            for targ in list(overlap):
-                targ_offset = args.index(targ)
-                s = sink(cf.ast.name, targ_offset)
+            if overlap:
+                #print '\tcf args of mine that flow to tainted sinks:', repr(overlap)
+                for targ in list(overlap):
+                    targ_offset = args.index(targ)
+                    s = sink(cf.ast.name, targ_offset)
 
-                print '\t ginning a new sink........', repr(s)
+                    #print '\t ginning a new sink........', repr(s)
 
-                outgoing_sinks.append(s)
-                # We know cf propagates taint, mark that
-                self.__big_map[cf_key].ttaint = True
+                    outgoing_sinks.append(s)
+                    # We know cf propagates taint, mark that
+                    self.__big_map[cf_key].ttaint = True
+            else:
+                self.__big_map[cf_key].ttaint = False
 
 
         # We can conclude I, cf, am trainsitively tainted so return my callers
@@ -895,7 +930,7 @@ class dfaAnalysis:
     def file_bug(self, cf, matches):
         print '\n\n!!!!A bug!!!!'
 
-        bug_str = "$%s in " % matches[0]
+        bug_str = "%s() var $%s in " % (cf.funcname, matches[0])
         L = [cf]
         while len(L) > 0:
             cf = L.pop()
@@ -973,7 +1008,8 @@ class dfaAnalysis:
             cf_key = func_list.pop()
             cf = self.__big_map[cf_key]
 
-            #print "\n Incoming f: %s sinks: %s" % (cf.name, repr(sink_list))
+            if self.verbose:
+                print "\n Incoming f: %s sinks: %s" % (cf.name, repr(sink_list))
             funcs_to_check_out, sinks_to_consider = self.far_taint_analysis(cf_key, sink_list)
             # tainted_vns = 
             # results.append(run_rules(cf, tainted_vns))
@@ -985,44 +1021,6 @@ class dfaAnalysis:
             #print "\toutgoing f: %s sinks: %s" % (repr(funcs_to_check_out), repr(sinks_to_consider))
             self.walkup(funcs_to_check_out, sinks_to_consider)
 
-
-
-
-
-            """
-
-            if cf.has_pri_sink and cf.has_pri_source:
-                print 'the impossibly easy case happened!'
-
-
-
-            
-            if cf.has_pri_sink:
-                # A function has sinks in it that are tainted, propagate this taint upwards by:
-                # 1. finding everyone who calls $current_funcion (cf)
-                # 2. Going to each caller, checking if they have sources that flow into a tainted arg into a Call to $cf
-                # 3. if they dont have sources but do accept arguments, mark them as a transitively tainted block and keep on chewing the chain upwards
-                if len(cf.incoming_calls) > 0:
-                    print 'im sinky: %s and I am called by: %s' % ( cf_key, repr(cf.incoming_calls))
-
-                    funcs_to_check_out, sinks_to_consider  = self.far_taint_analysis(cf, cf.pri_sinks)
-                    self.walkup(funcs_to_check_out, sinks_to_consider)
-
-
-                    # mark the callers as tainted 
-                    # TODO this needs intra_taint_analysis() run first to be accurate at all of course...
-                    for k in cf.incoming_calls:
-                        self.__big_map[k].ttaint = True
-                    # walkup(cf.incoming_calls)
-
-            # Tthis is BY FAR most common case so move to first test in this loop for perf.....
-            if cf.ttaint:
-                # Uncomment once this func is written... its applicable for this case too
-                #funcs_to_check_out = self.far_taint_analysis(cf)
-                #self.walkup(funcs_to_check_out)
-                pass
-
-            """
 
             """
             rough notes from whiteboard + pacing
@@ -1189,7 +1187,7 @@ class dfaAnalysis:
                 # the easier of the cases.
                 if isinstance(n.func, ast.Name):
                     funcname = n.func.id
-                    print 'Call(easy).......', repr(funcname)
+                    #print 'Call(easy).......', repr(funcname)
 
                     # A big blacklist of functions that if there is a Call() instance to, we dont care
                     # This is for things we know are safe or happen often and are likely safe
@@ -1212,12 +1210,12 @@ class dfaAnalysis:
                 """
                 if isinstance(n.func, ast.Attribute):
                     if hasattr(n.func.value, "id"):
-                        print 'Call(hard)........',repr(n.func.value.id)
+                        #print 'Call(hard)........',repr(n.func.value.id)
 
                         # Technically this is a method or a func name and we
                         # are not yet sure which one. 
                         method_name = n.func.attr
-                        print method_name
+                        #print method_name
 
                         """
                         The lefthand side of a call.
@@ -1624,6 +1622,7 @@ def main():
     parser.add_argument("-f", "--full", action="store_true", default=False, help="return full (unconfirmed) results")
     parser.add_argument("-v", "--verbose", action="store_true", default=False, help="increase verbosity")
     parser.add_argument("-vv", "--veryverbose", action="store_true", default=False, help="really really verbose")
+    parser.add_argument("-t", "--targets", action="store_true", default=False, help="target function name")
     args = parser.parse_args()
 
     target_dir = args.dir
