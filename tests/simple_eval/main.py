@@ -41,9 +41,8 @@ def func_six():
 def func_seven():
     a = request.args.get("foo")
     b = 42
-    c = a
-    d = {"rargh" : "rargh value!!", "c key" : c, "b key" : b, "foo key" : 'foo value'}
-    eval(d.get("c key"))
+    copy_of_a = a
+    eval(copy_of_a)
 
 
 
