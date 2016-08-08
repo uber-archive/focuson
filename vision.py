@@ -80,16 +80,18 @@ class Issue:
     takes in user input and then later on passes that user input through
     other variables or functions to arrive at a dangerous sink.
     """
-    def __init__(self, cf_of_matchpoint, call_chain):
+    def __init__(self, cf_of_matchpoint, call_chain, source_varname):
         #self.sinkname = sinkname 
         self.cf = cf_of_matchpoint
         self.call_chain = call_chain
+        # The variable name that starts the whole vulnerability
+        self.source_varname = source_varname
 
     def display(self):
         pass
 
     def __repr__(self):
-        return "Issue through %s to %s" % (repr(self.call_chain), self.cf.name)
+        return "Issue $%s -> %s to %s " % (self.source_varname, repr(self.call_chain), self.cf.name)
 
 
 class NopFilters(UserDict.DictMixin):
@@ -213,7 +215,7 @@ class Engine:
         self.__template_dir = None
         self.perform_jinja_analysis = False
 
-        self.verbose = False 
+        self.verbose = False
         self.__detective_mode = True
 
         self.METHOD_BLACKLIST = "format"
@@ -234,6 +236,7 @@ class Engine:
         #rt_sink.kwarg_handler = self.rt_sink_kwarg_handler_func
         rt_sink.rule = self.webp2_render_template_sink_get_tainted_vars
 
+        json_sink = sink("jsonify", 0)
 
 
         # TODO, could there be multiple rules attached to a sink? web-p2..login..api..etc? all need to handle render_template for instance...
@@ -242,6 +245,7 @@ class Engine:
             esc_sink,
             rt_sink,
             eval_sink,
+            json_sink,
             ]
  
 
@@ -606,6 +610,7 @@ class Engine:
     def parse_call(self, n):
         #print '\tparsing a call...'
         #print astpp.dump(n)
+        #print "\n"
 
         func_name = None
         arg_offset_pairs = []
@@ -664,22 +669,30 @@ class Engine:
 
 
                     if func_name == s.name and len(arg_offset_pairs) > 0:
-                        #tainted_vars.append(args_into_func[offset])
-                        #print "\t\t", func_name + "()"
-                        #print "\t\t so->", s.arg_offset
                         for (arg_into_func, arg_offset) in arg_offset_pairs:
-                            #print "\t\t", arg_into_func
-                            #print "\t\t", arg_offset
                             if arg_offset == s.arg_offset:
                                 tainted_vars[arg_into_func] = s.name
 
                     elif func_name == None:
                         #func_name, arg_offset_pairs = self.parse_as_other_case()
                         pass
-                        
-
+                        """                        
+                        Call(func=Name(id='render_template', ctx=Load()), args=[
+                            Str(s='endorsement.html'),
+                          ], keywords=[], starargs=None, kwargs=Name(id='template_vars', ctx=Load()))
+                        """
 
                     if isinstance(n.func, ast.Name) and hasattr(n.func, "id") and n.func.id == s.name:
+                        # The sink("asdf", **some_args) case
+                        if hasattr(n, "kwargs") and isinstance(n.kwargs, ast.Name):
+                            sinkvar = n.kwargs.id
+                            tainted_vars[sinkvar] = s.name
+                            continue
+
+                        # The sink("asdf", *args) case
+                        if hasattr(n, "starargs"):
+                            # todo someday, do something
+                            pass
 
                         if not hasattr(n, "args"):
                             continue
@@ -781,14 +794,6 @@ class Engine:
 
         # At this stage tainted_vars are all ast.Names or ast.Dicts etc so extract the actual variable names
 
-        #print '\n'
-        #print '..... tghe tainted vars inside.......'
-        #for x in tainted_vars:
-        #    print '-' * 80
-        #    if isinstance(x, str):
-        #        print x
-
-
         # Look at all assigns to determine if an argument to this function flows to the sinks arguments
         if tainted_vars:
             assigns = []
@@ -798,11 +803,29 @@ class Engine:
             # Collect list of assigns
             for n in ast.walk(cf.ast):
                 if isinstance(n, ast.Assign):
-                    if not hasattr(n.targets[0], "id") or not hasattr(n.value, "id"):
+                    #print '\nan assign!', astpp.dump(n)
+
+                    # if the lhr is not a "var =" then next
+                    if not hasattr(n.targets[0], "id") or not isinstance(n.targets[0], ast.Name):
                         continue
-                    (lhs, rhs) = (n.targets[0].id, n.value.id)
-                    assigns.append((lhs, rhs))
-     
+
+                    # var1 = var2 case
+                    if hasattr(n.value, "id") and isinstance(n.value, ast.Name):
+                        (lhs, rhs) = (n.targets[0].id, n.value.id)
+                        assigns.append((lhs, rhs))
+
+                    # var1 = {"a" : a, "b" : b} case
+                    # Explode the dict into assigns and note the rhs varname
+
+                    if isinstance(n.value, ast.Dict):
+                        lhs = n.targets[0].id
+                        #k = n.value.keys
+                        #v = n.value.values
+                        for v in n.value.values:
+                            if isinstance(v, ast.Name):
+                                rhs = v.id
+                                assigns.append((lhs, rhs))
+
             #print '\t cf assigns..........', repr(assigns)
 
             # if we have 8 assigns we need to do 8*8 rounds through loop to 
@@ -863,16 +886,17 @@ class Engine:
     def find_tainted_sources(self, cf, sink_tainted_vars):
         matches = []
         source_tainted_vars = []
+
         for n in ast.walk(cf.ast):
-            # Look at all the assigns to find any cases of foo = request.*
+
+            # var1 = request.* case
             if isinstance(n, ast.Assign):
-                if not hasattr(n.targets[0], "id"):
-                    continue
-                (lhs, rhs) = (n.targets[0].id, n.value)
-                #print 'lhs: %s' % repr(lhs)
-                #print 'rhs: %s' % repr(rhs)
-                if self.dangerous_source_assignment(rhs):
-                    source_tainted_vars.append(lhs)
+                if hasattr(n.targets[0], "id"):
+                    (lhs, rhs) = (n.targets[0].id, n.value)
+                    #print 'lhs: %s' % repr(lhs)
+                    #print 'rhs: %s' % repr(rhs)
+                    if self.dangerous_source_assignment(rhs):
+                        source_tainted_vars.append(lhs)
 
             # Handle app.route("/foo/<some_argument>")
             if isinstance(n, ast.FunctionDef) and hasattr(n, "decorator_list"):
@@ -896,9 +920,9 @@ class Engine:
 
         return matches
 
+
     def file_bug(self, cf, matches, tainted_vars_to_sinks):
         #print '\n\n!!!!A bug!!!!'
-
 
         #source = codegen.to_source(fti.ast)
         #self.issues_found.append()
@@ -920,12 +944,12 @@ class Engine:
                 L.append(tc)
                 call_chain.append(tc.funcname)
         
-        sinkname = "eval" #tainted_vars_to_sinks[start_of_chain_varname]
         cf_of_matchpoint = cf
 
         #source = codegen.to_source(cf.ast)
         #print repr(source)
-        issue = Issue(cf_of_matchpoint, call_chain)
+        
+        issue = Issue(cf_of_matchpoint, call_chain, varname_into_sink)
         self.issues_found.append(issue)
         #print bug_str
 
@@ -938,6 +962,10 @@ class Engine:
 
         # xx = True/False/None, skip em
         if isinstance(n, ast.Name):
+            return False
+
+        if isinstance(n, ast.Dict):
+            "print other side is a dict............."
             return False
 
         if isinstance(n, ast.Subscript):
