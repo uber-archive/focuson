@@ -25,12 +25,9 @@ TODO:
     * Run against taishan, login, free-candy
     * Make it gracefully handle api/, run against it, learn stuff, improve
 
-    * DONE - Get tainted source from app.route() method
     * DONE - Break up giant jinja2 xss rule into a big sink rule that gets interesting variables from the jinja2 but is otherwise just like the eval() test
     * LOTS MORE TESTS
     * add def/use for variables that are tainted but then redefined and safe
-    * taint prop through function calls... can be tricky to determine statically which function will be called but just approximate/best guess based off pythons duck typing rules (class first, then module, then global)
-    * Handle taint prop through dicts....... dict creation specifically
     * Handle binOp cases where x = TAINTED; x = x + "some string"; eval(x)
     * Handle eval("foo bar baz %s" % x) case, x = tainted
     * Look through old bugs to find actual good sinks, json.dumps()? requests? urllib?
@@ -216,13 +213,14 @@ class Engine:
         self.perform_jinja_analysis = False
 
         self.verbose = False
-        self.__detective_mode = True
+        self.__detective_mode = False
+
+        self.interesting_functions = []
 
         self.METHOD_BLACKLIST = "format"
 
         self.issues_found = []
 
-        self.uniq_modules = None 
         self.tside_unsafe_tn_to_vars = {}
 
         ehc_sink = sink("extend_home_context", 0)
@@ -230,6 +228,10 @@ class Engine:
         # make one for extend_signup_context
         # make one for templated() which is the same as extend_home_context...
         rt_sink = sink("render_template", 1)
+
+        frt_sink = sink("flask", 1)
+
+
         # TODO - a flask.render_template() sink and test
         eval_sink = sink("eval", 0)
 
@@ -246,8 +248,17 @@ class Engine:
             rt_sink,
             eval_sink,
             json_sink,
+            frt_sink,
             ]
  
+
+    def handle_args(self, args):
+        if args.verbose:
+            self.verbose = True
+
+        if args.detective:
+            self.__detective_mode = True
+
 
     def handle_keyword_case(self, n):
         L = []
@@ -429,20 +440,6 @@ class Engine:
         if self.perform_jinja_analysis:
             self.__template_dir = self.get_template_dir()
 
-    def derive_module(self, fn):
-        # do something with the base processing dir... 
-        # do more cleverness to figure out what portion of the filename is an importable
-        # python module... maybe just venv try to import it?!
-        # Since this is expensive maybe persist to disk/sqlite db
-        
-        # TODO this critical to get right and almost certainly wrong... just testing for now....
-        # it works for tests but not partners... need more sophisticated work than lopping off the end foo.py file
-        # and calling that the module....
-        L = fn.split(os.sep)
-        last = L[-1]
-        if last.endswith('.py'):
-            last = last[:-3]
-        return last
 
     def process_funcs(self):
         """
@@ -453,7 +450,6 @@ class Engine:
             raise Exception("No asts parsed from filenames to analyze")
         
         processed_class_methods = []
-
         project_imports = {}
 
         # Round 0 - Determine what each file imports 
@@ -542,7 +538,7 @@ class Engine:
             #print name, repr(fti)
             fti.outgoing_calls = self.get_outgoing_calls(fti)
 
-        # Round 3 - for each function compute a list of all caller functions
+        # Round 4 - for each function compute a list of all caller functions
         # This is why we should be using a graph, not a big dict... fast querying from either "side".
         who_called_me = {}
         for (name, fti) in self.__big_map.items():
@@ -561,13 +557,17 @@ class Engine:
         #pp.pprint(who_called_me)
 
         
-        # Round 3 - foreach function see if its body contains any known
+        # Round 5 - foreach function see if its body contains any known
         # dangerous sources or sinks
         for (name, fti) in self.__big_map.items():
             fti.pri_sinks = self.get_pri_sinks(fti)
             fti.has_pri_sink = bool(len(fti.pri_sinks))
+            #fti.has_pri_source = self.has_pri_sources(fti)
 
-            fti.has_pri_source = self.get_sources(fti)
+            # If a function has a dangerous sink AND is handling user input it
+            # may merit a deeper look
+            #if fti.has_pri_sink and fti.has_pri_source:
+            #    self.interesting_functions.append(name)
 
 
     def main_analysis(self):
@@ -604,7 +604,6 @@ class Engine:
             not_ttainted_funcs = [v.funcname for (k,v) in self.__big_map.items() if v.ttaint == False]
             print "%d functions analyzed" % len(self.__big_map.keys())
             print "%d ttainted: %s " % (len(ttainted_funcs), repr(ttainted_funcs))
-            #print "%d not ttainted: %s" % (len(not_ttainted_funcs), repr(not_ttainted_funcs))
 
 
     def parse_call(self, n):
@@ -740,6 +739,13 @@ class Engine:
 
     def far_taint_analysis(self, cf_key, incoming_sinks):
         """ 
+        Map taintedness between functions
+
+         We want to determine if any of our inputs as a func (arguments) 
+         make it to OUR dangerous sink which isn't a REAL PRIMARY dangerous 
+         sink like mysql_query() but instead the function call to d() or e() 
+         which themselves have been checked for trainsitive or primary taintedness.
+
         cf = current function
         incoming_sinks = a set of tainted sinks to check against
 
@@ -792,9 +798,9 @@ class Engine:
 
 
 
-        # At this stage tainted_vars are all ast.Names or ast.Dicts etc so extract the actual variable names
 
         # Look at all assigns to determine if an argument to this function flows to the sinks arguments
+        # At this stage tainted_vars are all ast.Names or ast.Dicts etc so extract the actual variable names
         if tainted_vars:
             assigns = []
             if self.verbose:
@@ -816,7 +822,6 @@ class Engine:
 
                     # var1 = {"a" : a, "b" : b} case
                     # Explode the dict into assigns and note the rhs varname
-
                     if isinstance(n.value, ast.Dict):
                         lhs = n.targets[0].id
                         #k = n.value.keys
@@ -884,6 +889,11 @@ class Engine:
 
 
     def find_tainted_sources(self, cf, sink_tainted_vars):
+        """ 
+        Tainted sources are places where we collect user-controlled input
+        A user being able to control a variable which eventually makes it into
+        a sink can constitute a security vulnerability.
+        """
         matches = []
         source_tainted_vars = []
 
@@ -897,6 +907,8 @@ class Engine:
                     #print 'rhs: %s' % repr(rhs)
                     if self.dangerous_source_assignment(rhs):
                         source_tainted_vars.append(lhs)
+
+            # TODO - is this the place to handle nameless/anon variables like {"a" : request.args}?
 
             # Handle app.route("/foo/<some_argument>")
             if isinstance(n, ast.FunctionDef) and hasattr(n, "decorator_list"):
@@ -1007,7 +1019,7 @@ class Engine:
 
     def walkup(self, func_list, sink_list):
         """
-        Recursively analyize functions to determine of they propagate taint.
+        Recursively analyze functions to determine of they propagate taint.
 
         Each iteration of walkup() collects more sinks and functions to check out
 
@@ -1029,25 +1041,6 @@ class Engine:
             #print "\toutgoing f: %s sinks: %s" % (repr(funcs_to_check_out), repr(sinks_to_consider))
             self.walkup(funcs_to_check_out, sinks_to_consider)
 
-
-
-    def intra_taint_analysis(self, fti):
-        """ Given a function determine
-        """
-        pass
-
-        # TODO other big chunk of work is doing the assingment analysis inside the function body
-        """
-         I think we basically want to determine bottoms up here
-         that means if a->b->c->d->e and we are c() and e() has dangerous_sink our goal is to
-         figure out if:
-         1. we have a danger source that feeds into our Call of d() which feeds into its Call of e() which feeds into e()s dangerous_sink() call
-         2. If not #1, we want to figure out all our callers and walk up the chain (which is handled by walkup() above)
-
-         We want to determine if any of our inputs as a func (arguments) make it to OUR dangerous sink which isn't a REAL PRIMARY dangerous sink like mysql_query() but instead
-         the function call to d() or e() which themselves have been checked for trainsitive or primary taintedness.
-        """
-        
                 
     def get_pri_sinks(self, fti):
         """ 
@@ -1057,40 +1050,31 @@ class Engine:
         L = []
         for n in ast.walk(fti.ast):
             if isinstance(n, ast.Call):
-                if hasattr(n.func, "id"):
+                if isinstance(n.func, ast.Name):
+                    #hasattr(n.func, "id"):
                     for s in self.LIST_OF_SINKS:
                         if n.func.id == s.name:
                             L.append(s)
+
+                # TODO come back to this tomorrow with food in me..........
+                # going to need to change this check in a few places.....:w
+                # flask.render_template() is an example of this
+                #if isinstance(n.func, ast.Attribute):
+                #    if hasattr(n.func.value, "id") and n.func.value.id == "flask" and n.func.attr == "render_template":
+                #        s = sink("render_template", 1)
+                #        L.append(s)
         return L
 
 
-    def get_sources(self, fti):
-        # TODO parse the body of a given ast funcDef and determine if there are any request.* whatevers
+
+    def has_pri_sources(self, fti):
+        """
+        parse the body of a given func to determine if there are any request.* whatevers
+        """
         L = []
         return L
         
     
-    def handle_outfile_calls(self, n, fti):
-        """
-        One python file (f1) commonly imports another python file (f2) as a module 
-        to call the functions inside it. To map which functions call which other
-        functions we want to find all of these. 
-
-        Currently we do this by checking fuzzily checking the imports of f2 in f1
-        to get a baseline set of functions in f2 that could be called from f1. 
-
-        Then we identify and return any instances of Calls() to f2s funcs
-        """
-        # Determine the maximum set of functions that *could* be callable in F1 from F2
-        # do this from a computed-once set of imports done per-file, maybe something like:
-        # fti.modules_imported
-
-        if n.func.value.id in self.uniq_modules:
-            # we return it in the format used for keys in the big map. Hopefully change this format later
-            # ex: '/some_lib.py::far_out': <function taint info> name: /some_lib.py::far_out in: [] out: [],
-            s = "/" + n.func.value.id + ".py" + "::" + n.func.attr
-            return s
-
 
     def wrangle_classname_from_call(self, n):
 
@@ -1617,13 +1601,15 @@ def main():
     parser.add_argument('dir', metavar='dir', help='the directory of code to scan')
     parser.add_argument("-f", "--full", action="store_true", default=False, help="return full (unconfirmed) results")
     parser.add_argument("-v", "--verbose", action="store_true", default=False, help="increase verbosity")
-    parser.add_argument("-vv", "--veryverbose", action="store_true", default=False, help="really really verbose")
-    parser.add_argument("-t", "--targets", action="store_true", default=False, help="target function name")
+    parser.add_argument("-d", "--detective", action="store_true", default=False, help="Detective mode")
+    #parser.add_argument("-t", "--targets", action="store_true", default=False, help="target function name")
     args = parser.parse_args()
 
     target_dir = args.dir
 
     engine = Engine()
+    engine.handle_args(args)
+
     engine.ingest(target_dir)
     engine.process_funcs()
     engine.main_analysis()

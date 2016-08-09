@@ -49,6 +49,25 @@ class TestInOneFileDataflow(unittest.TestCase):
         self.assertTrue(len(self.engine.issues_found) == 1)
         self.assertEqual(self.engine.issues_found[0].cf.name, "kwargs::render_endorsement_landing")
 
+    def test_app_route_args(self):
+        """
+        In flask a decorator like app.route(...) can designate arguments. ex:
+
+        @app.route('/open-app/<foo>/', methods=['GET'])
+        def open_app(foo):
+            print foo
+ 
+        we need to consider these arguments equivalent to 
+        foo = request.args.get("asdf") because they are. 
+        """
+        target_dir = os.getcwd() + os.sep + "app_route_tainting"
+        self.engine.ingest(target_dir)
+        self.engine.process_funcs()
+        self.engine.main_analysis()
+        self.assertTrue(len(self.engine.issues_found) == 1)
+        self.assertEqual(self.engine.issues_found[0].cf.name, "main::open_app")
+
+
 
 
 
