@@ -140,13 +140,16 @@ class sink:
         self.kwarg_handler = None
         self.rule = None
 
-        # Module = the module name
+        # Module = the module name, star by default
         self.module = None
     
-    def __str__(self):
-        return "%s(arg_%s)" % (self.name, self.arg_offset) 
     def __repr__(self):
-        return "%s(arg_%s)" % (self.name, self.arg_offset) 
+        if self.module:
+            s = "%s.%s(arg_%s)" % (self.module, self.name, self.arg_offset)
+        else:
+            s = "%s(arg_%s)" % (self.name, self.arg_offset) 
+        return s
+
 
 
 class functionTaintInfo:
@@ -224,16 +227,22 @@ class Engine:
         self.tside_unsafe_tn_to_vars = {}
 
         ehc_sink = sink("extend_home_context", 0)
+        ehc_sink.module = "*"
+
         esc_sink = sink("extend_signup_context", 0)
+        esc_sink.module = "*"
         # make one for extend_signup_context
         # make one for templated() which is the same as extend_home_context...
         rt_sink = sink("render_template", 1)
+        rt_sink.module = "*"
 
-        frt_sink = sink("flask", 1)
+        frt_sink = sink("render_template", 1)
+        frt_sink.module = "flask"
 
 
         # TODO - a flask.render_template() sink and test
         eval_sink = sink("eval", 0)
+        eval_sink.module = "*"
 
         #rt_sink.kwarg_handler = self.rt_sink_kwarg_handler_func
         rt_sink.rule = self.webp2_render_template_sink_get_tainted_vars
@@ -621,15 +630,35 @@ class Engine:
                 #print s.module
                 #print n.func.attr
                 #print s.name
-                #print astpp.dump(n.func)
-
                 func_name = n.func.attr
+
+
                 if len(n.args) > 0:
                     for a in n.args:
                         if isinstance(a, ast.Name):
                             i = n.args.index(a)
                             p = (a.id, i)
                             arg_offset_pairs.append(p)
+
+                        if isinstance(a, ast.Dict):
+                            arg_offset_of_dict_argument = n.args.index(a)
+                            for k in a.keys:
+                                i = a.keys.index(k)
+                                v = a.values[i]
+                                if isinstance(v, ast.Name):
+                                    p = (v.id, arg_offset_of_dict_argument)
+                                    arg_offset_pairs.append(p)
+ 
+                        if isinstance(a, ast.Call):
+                            pass
+
+                    # What is the arg offset of a keyword argument... uh oh. 
+                    if hasattr(n, "keywords") and len(n.keywords) > 0:
+                        for a in n.keywords:
+                            i = n.keywords.index(a)
+                            if isinstance(a, ast.Name):
+                                p = (a.id, i)
+                                arg_offset_pairs.append(p)
 
         return func_name, arg_offset_pairs
 
@@ -662,24 +691,103 @@ class Engine:
             # Get the function-scoped variable name of the argument to our sink
             for n in ast.walk(cf.ast):
                 if isinstance(n, ast.Call):
+                    # Step 1 - extract the functions name to see if it matches a sink
+                    # Function calls can come in a few different forms. 
+
+                    #func_name, arg_offset_pairs = self.parse_call(n)
+                    func_name = None
+
                     # First try parsing as some_lib.foo()
-                    # TODO rename and possible remove this... see down below where we handle lots of cases
-                    func_name, arg_offset_pairs = self.parse_call(n)
+                    if isinstance(n.func, ast.Attribute):
+                        if hasattr(n.func.value, "id") and hasattr(n.func, "attr"):
+                            # This would most correctly be called "method or function name"
+                            func_name = n.func.attr
+                            # Likewise this is more accurately module or instance name
+                            module_name = n.func.value.id 
 
 
-                    if func_name == s.name and len(arg_offset_pairs) > 0:
-                        for (arg_into_func, arg_offset) in arg_offset_pairs:
-                            if arg_offset == s.arg_offset:
-                                tainted_vars[arg_into_func] = s.name
+                    # Try parsing as the simpler function_call()
+                    if not func_name and isinstance(n.func, ast.Name) and hasattr(n.func, "id"):
+                        func_name = n.func.id
+                        module_name = "*"
 
+
+                    # TODO - this used to check name and module, but some bare function names
+                    # wont work if we do this, I think I would need to change general function
+                    # parsing on the injest()-side to tag all sinks with a default module of *
+                    #if func_name == s.name and module_name == s.module:
+
+                    # We have the function name, see if it matches...
+                    if func_name == s.name:
+                    
+                        # We found a match! Now parse out all the different
+                        # styles of arguments it could be passed so we can
+                        # determine what set of variables are passed into it
+
+                        # Simple argument case, func(a,b,c)
+                        if len(n.args) > 0:
+                            for a in n.args:
+                                if isinstance(a, ast.Name):
+                                    # Sinks define which # argument to themselves matters
+                                    #  ensure we match that in addition to the sink name
+                                    arg_offset = n.args.index(a)
+                                    if arg_offset == s.arg_offset:
+                                        var_name = a.id
+                                        tainted_vars[var_name] = s.name
+
+                                # TODO handle for both arg cases, the "hey this guy just did the simplest/dumbest thing possible and threw a request in here..."
+                                # func(a, request.args.get(), c)
+                                #if isinstance(a, ast.Call):
+                                #    if self.dangerous_source_assignment(a):
+                                #        pass
+                                #        # do something
+
+
+
+                                # ex: func(a, b, {"foo" : foo, "bar" : bar})
+                                if isinstance(a, ast.Dict):
+                                    arg_offset = n.args.index(a)
+                                    if arg_offset == s.arg_offset:
+                                        for k in a.keys:
+                                            i = a.keys.index(k)
+                                            v = a.values[i]
+                                            if isinstance(v, ast.Name):
+                                                tainted_vars[v.id] = s.name
+
+                        # TODO do something here... do sinks need a list of kwargs that would be tainted? equiv to arg_offset for the simpler cases?
+                        # if they get this, would we handle propagation later during the assingment-checking phase?
+                        # right now we are super/extremely optimistically tainting
+                        # Keyword arguments, func(a="asdf", b="foo", c="bar")
+                        if len(n.keywords) > 0:
+                            for a in n.keywords:
+                                i = n.keywords.index(a)
+                                print astpp.dump(n)
+                                # keyword(arg='title', value=Name(id='title', ctx=Load()))
+                                if isinstance(a.value, ast.Name):
+                                    sinkvar = a.value.id
+                                    tainted_vars[sinkvar] = s.name
+
+                        if hasattr(n, "kwargs") and isinstance(n.kwargs, ast.Name):
+                            sinkvar = n.kwargs.id
+                            tainted_vars[sinkvar] = s.name
+ 
+                        # The sink("asdf", *args) case
+                        if hasattr(n, "starargs"):
+                            # todo someday, do something
+                            pass
+
+
+
+                    """
+
+    def dangerous_source_assignment(self, n):
+                    #if func_name == s.name and len(arg_offset_pairs) > 0:
+                    #    for (arg_into_func, arg_offset) in arg_offset_pairs:
+                    #        if arg_offset == s.arg_offset:
+                    #            tainted_vars[arg_into_func] = s.name
                     elif func_name == None:
                         #func_name, arg_offset_pairs = self.parse_as_other_case()
                         pass
-                        """                        
-                        Call(func=Name(id='render_template', ctx=Load()), args=[
-                            Str(s='endorsement.html'),
-                          ], keywords=[], starargs=None, kwargs=Name(id='template_vars', ctx=Load()))
-                        """
 
                     if isinstance(n.func, ast.Name) and hasattr(n.func, "id") and n.func.id == s.name:
                         # The sink("asdf", **some_args) case
@@ -720,6 +828,7 @@ class Engine:
                                 if isinstance(v, ast.Name):
                                     # We can comprehend this, its a varname as a value in a dict, taint it
                                     tainted_vars[v.id] = s.name
+                    """
         return tainted_vars
 
 
@@ -1051,18 +1160,16 @@ class Engine:
         for n in ast.walk(fti.ast):
             if isinstance(n, ast.Call):
                 if isinstance(n.func, ast.Name):
-                    #hasattr(n.func, "id"):
                     for s in self.LIST_OF_SINKS:
                         if n.func.id == s.name:
                             L.append(s)
 
-                # TODO come back to this tomorrow with food in me..........
-                # going to need to change this check in a few places.....:w
-                # flask.render_template() is an example of this
-                #if isinstance(n.func, ast.Attribute):
-                #    if hasattr(n.func.value, "id") and n.func.value.id == "flask" and n.func.attr == "render_template":
-                #        s = sink("render_template", 1)
-                #        L.append(s)
+                # handle flask.render_template() case
+                if isinstance(n.func, ast.Attribute):
+                    if isinstance(n.func.value, ast.Name):
+                        for s in self.LIST_OF_SINKS:
+                            if n.func.value.id == s.module and n.func.attr == s.name:
+                                L.append(s)
         return L
 
 

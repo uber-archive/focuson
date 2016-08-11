@@ -49,6 +49,19 @@ class TestInOneFileDataflow(unittest.TestCase):
         self.assertTrue(len(self.engine.issues_found) == 1)
         self.assertEqual(self.engine.issues_found[0].cf.name, "kwargs::render_endorsement_landing")
 
+    def test_kwargs_two(self):
+        """
+        The case where taint is propagated into a sink() via a=varname kwargs style
+        """
+        target_dir = os.getcwd() + os.sep + "kwargs_two"
+        self.engine.ingest(target_dir)
+        self.engine.process_funcs()
+        self.engine.main_analysis()
+        self.assertTrue(len(self.engine.issues_found) == 1)
+        self.assertEqual(self.engine.issues_found[0].cf.name, "main::partner_app")
+
+
+
     def test_app_route_args(self):
         """
         In flask a decorator like app.route(...) can designate arguments. ex:
