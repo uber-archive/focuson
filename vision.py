@@ -615,53 +615,6 @@ class Engine:
             print "%d ttainted: %s " % (len(ttainted_funcs), repr(ttainted_funcs))
 
 
-    def parse_call(self, n):
-        #print '\tparsing a call...'
-        #print astpp.dump(n)
-        #print "\n"
-
-        func_name = None
-        arg_offset_pairs = []
-
-        # A some_lib.foo() type Call
-        if isinstance(n.func, ast.Attribute):
-            if hasattr(n.func.value, "id") and hasattr(n.func, "attr"):
-                #print n.func.value.id
-                #print s.module
-                #print n.func.attr
-                #print s.name
-                func_name = n.func.attr
-
-
-                if len(n.args) > 0:
-                    for a in n.args:
-                        if isinstance(a, ast.Name):
-                            i = n.args.index(a)
-                            p = (a.id, i)
-                            arg_offset_pairs.append(p)
-
-                        if isinstance(a, ast.Dict):
-                            arg_offset_of_dict_argument = n.args.index(a)
-                            for k in a.keys:
-                                i = a.keys.index(k)
-                                v = a.values[i]
-                                if isinstance(v, ast.Name):
-                                    p = (v.id, arg_offset_of_dict_argument)
-                                    arg_offset_pairs.append(p)
- 
-                        if isinstance(a, ast.Call):
-                            pass
-
-                    # What is the arg offset of a keyword argument... uh oh. 
-                    if hasattr(n, "keywords") and len(n.keywords) > 0:
-                        for a in n.keywords:
-                            i = n.keywords.index(a)
-                            if isinstance(a, ast.Name):
-                                p = (a.id, i)
-                                arg_offset_pairs.append(p)
-
-        return func_name, arg_offset_pairs
-
     def collect_sinky_varnames(self, incoming_sinks, cf):
         """
         Return all the variable names from within this function (cf) 
@@ -719,7 +672,6 @@ class Engine:
 
                     # We have the function name, see if it matches...
                     if func_name == s.name:
-                    
                         # We found a match! Now parse out all the different
                         # styles of arguments it could be passed so we can
                         # determine what set of variables are passed into it
@@ -735,12 +687,11 @@ class Engine:
                                         var_name = a.id
                                         tainted_vars[var_name] = s.name
 
-                                # TODO handle for both arg cases, the "hey this guy just did the simplest/dumbest thing possible and threw a request in here..."
                                 # func(a, request.args.get(), c)
-                                #if isinstance(a, ast.Call):
-                                #    if self.dangerous_source_assignment(a):
-                                #        pass
-                                #        # do something
+                                if isinstance(a, ast.Call):
+                                    if self.dangerous_source_assignment(a):
+                                        matches = ["$"]
+                                        self.file_bug(cf, matches)
 
 
 
@@ -753,6 +704,15 @@ class Engine:
                                             v = a.values[i]
                                             if isinstance(v, ast.Name):
                                                 tainted_vars[v.id] = s.name
+                                            # func(a, {"b" : request.args.get()}, c)
+                                            if isinstance(v, ast.Call):
+                                                if self.dangerous_source_assignment(v):
+                                                    if isinstance(k, ast.Str):
+                                                        matches = [k.s]
+                                                    else:
+                                                        matches = ["$"]
+                                                    self.file_bug(cf, matches)
+
 
                         # TODO do something here... do sinks need a list of kwargs that would be tainted? equiv to arg_offset for the simpler cases?
                         # if they get this, would we handle propagation later during the assingment-checking phase?
@@ -761,7 +721,7 @@ class Engine:
                         if len(n.keywords) > 0:
                             for a in n.keywords:
                                 i = n.keywords.index(a)
-                                print astpp.dump(n)
+                                #print astpp.dump(n)
                                 # keyword(arg='title', value=Name(id='title', ctx=Load()))
                                 if isinstance(a.value, ast.Name):
                                     sinkvar = a.value.id
@@ -776,59 +736,6 @@ class Engine:
                             # todo someday, do something
                             pass
 
-
-
-                    """
-
-    def dangerous_source_assignment(self, n):
-                    #if func_name == s.name and len(arg_offset_pairs) > 0:
-                    #    for (arg_into_func, arg_offset) in arg_offset_pairs:
-                    #        if arg_offset == s.arg_offset:
-                    #            tainted_vars[arg_into_func] = s.name
-                    elif func_name == None:
-                        #func_name, arg_offset_pairs = self.parse_as_other_case()
-                        pass
-
-                    if isinstance(n.func, ast.Name) and hasattr(n.func, "id") and n.func.id == s.name:
-                        # The sink("asdf", **some_args) case
-                        if hasattr(n, "kwargs") and isinstance(n.kwargs, ast.Name):
-                            sinkvar = n.kwargs.id
-                            tainted_vars[sinkvar] = s.name
-                            continue
-
-                        # The sink("asdf", *args) case
-                        if hasattr(n, "starargs"):
-                            # todo someday, do something
-                            pass
-
-                        if not hasattr(n, "args"):
-                            continue
-                        if not len(n.args) > 0:
-                            continue
-
-                        try:
-                            sinkvar = n.args[s.arg_offset]
-                        except IndexError:
-                            # Weird case, we have a sink and an offset and the
-                            # case of that sink we found doesn't fit that
-                            # argument pattern, just continue
-                            # Seen this happen with render_template(var)
-                            # where we instead expect render_template("blah/foo.html", var)
-                            continue
-
-
-                        if isinstance(sinkvar, ast.Name):
-                            #tainted_vars.append(sinkvar.id)
-                            tainted_vars[sinkvar.id] = s.name
-
-                        elif isinstance(sinkvar, ast.Dict):
-                            for k in sinkvar.keys:
-                                i = sinkvar.keys.index(k)
-                                v = sinkvar.values[i]
-                                if isinstance(v, ast.Name):
-                                    # We can comprehend this, its a varname as a value in a dict, taint it
-                                    tainted_vars[v.id] = s.name
-                    """
         return tainted_vars
 
 
@@ -963,7 +870,7 @@ class Engine:
             # matches are the varnames in tainted vars that are also 
             # the lhs on a source assignment
             if matches:
-                self.file_bug(cf, matches, tainted_vars_to_sinks)
+                self.file_bug(cf, matches)
 
             # Mark ourselves as a dangerous sink if we propagate taint from our args to a sink
             # We now have the full set of tainted vars inside this function that flow to the sink
@@ -1042,7 +949,7 @@ class Engine:
         return matches
 
 
-    def file_bug(self, cf, matches, tainted_vars_to_sinks):
+    def file_bug(self, cf, matches):
         #print '\n\n!!!!A bug!!!!'
 
         #source = codegen.to_source(fti.ast)

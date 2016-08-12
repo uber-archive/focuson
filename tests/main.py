@@ -14,6 +14,32 @@ class TestInOneFileDataflow(unittest.TestCase):
     def tearDown(self):
         self.engine = None
 
+    def test_simple_inline(self):
+        """
+        Worlds simplist vuln:
+        eval(request.args.get("foo"))
+
+        """
+        target_dir = os.getcwd() + os.sep + "simple_inline"
+        self.engine.ingest(target_dir)
+        self.engine.process_funcs()
+        self.engine.main_analysis()
+        self.assertTrue(len(self.engine.issues_found) == 1)
+        self.assertEqual(self.engine.issues_found[0].cf.name, "main::func_seven")
+
+    def test_simple_inline_dict(self):
+        """
+        eval({"a" : request.args.get("foo")})
+        """
+        target_dir = os.getcwd() + os.sep + "simple_inline_dict"
+        self.engine.ingest(target_dir)
+        self.engine.process_funcs()
+        self.engine.main_analysis()
+        self.assertTrue(len(self.engine.issues_found) == 1)
+        self.assertEqual(self.engine.issues_found[0].cf.name, "main::func_seven")
+
+
+
     def test_simpleEval(self):
         """
         Test a very simple case, 
