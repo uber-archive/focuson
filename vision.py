@@ -13,60 +13,35 @@ import jinja2
 import pprint
 
 
-
-
-
-
-
-
 """
-TODO:
-    * Make auditor mode that just shows areas of interest, lots of request. or whatnot
-    * Run against taishan, login, free-candy
-    * Make it gracefully handle api/, run against it, learn stuff, improve
+    focuson is a tool to find security bugs in python web applications. 
+    It uses dataflow analysis to model security flaws like xss, sqli, ssrf
+    as instances of a source flowing to a sink.
+    
+    A source is any user-controlled input e.g flask.request.args
+    
+    A sink is a dangerous function that could if user-controlled data
+    flows into it could constitute a security flaw
 
-    * DONE - Break up giant jinja2 xss rule into a big sink rule that gets interesting variables from the jinja2 but is otherwise just like the eval() test
-    * LOTS MORE TESTS
-    * add def/use for variables that are tainted but then redefined and safe
-    * Handle binOp cases where x = TAINTED; x = x + "some string"; eval(x)
-    * Handle eval("foo bar baz %s" % x) case, x = tainted
-    * Look through old bugs to find actual good sinks, json.dumps()? requests? urllib?
+    "flows to" encompasses the work done to "follow" a variable through
+    function calls and assignments to see if a source makes it to a sink.
+    This is the field of dataflow analysis and it can be done top down or
+    bottom up. Top down would mean identifying all the sources "down" to the
+    sinks and bottom up is the inverse. focuson performs bottom up analysis
+    first finding all the sinks and then determining recursively who passes
+    variables to that sink or calls it. 
 
+    Caveats - focuson currently ignores control flow and when given the option
+    taints optimistically. It also has a limited set of known sources and sinks
+    so to be useful we will need to build these up over time, right now its 
+    mostly useful only for flask applications.
 
-TODO:
-    * Enhance jinja2 template parsing code to not only look at |safe but any variable that goes into a <script> block
+    Glossary
+    "cf" - current function. 
+    primary - idea of primary source or sink is that it is in the current function
 
-
-README:
-    focuson is a flow-insensitive, intra-procedural dataflow-based program analysis tool for python. Its aim is to find likely areas for security engineers to review for bugs. 
-    In the future it will hopefully become inter-procedural and possibly flow-sensitive
-
-
-
-Rule families
-
-1. Ast rules. Simple as they operate upon the AST
-2. CFG rules. Don't know of any but they might exist, maybe around toctou or race conditions on files?
-3. Dataflow rules. xss/sqli/etc
-4. Human - blacklist of people who write bugs, interns, new people etc
-5. Experimential - codebase analysis, person x commits to this area a bunch but this is their first commit to area y.
-
-
-Specific future rules to write
-1. <script> inside an .html template, see login/templates/analytics.html and login/views/base.py. Send to human.
-example: https://code.uberinternal.com/D220082
-2. Copy robs rule around making a new jinja2 env since its easy to try, and fail, to turn on auto-escaping
-3. Robs sqli examples
-4. Add more to template xss rule, can also be done this way:
-    template = Template(survey.message)
-    final_message = template.render(url=final_url)
-5. HTTP response splitting
-6. XXE
-7. yaml.load() https://code.uberinternal.com/D207794
-8. pickle.load, http://kevinlondon.com/2015/08/15/dangerous-python-functions-pt2.html
-9. Robs existing bandit rule for new jinja2 environs
+    
 """
-
 
 
 class Issue:
@@ -77,18 +52,31 @@ class Issue:
     takes in user input and then later on passes that user input through
     other variables or functions to arrive at a dangerous sink.
     """
-    def __init__(self, cf_of_matchpoint, call_chain, source_varname):
-        #self.sinkname = sinkname 
+    def __init__(self, sinkname, cf_of_matchpoint, call_chain, source_varnames):
+        self.sinkname = sinkname 
         self.cf = cf_of_matchpoint
         self.call_chain = call_chain
-        # The variable name that starts the whole vulnerability
-        self.source_varname = source_varname
+        # The variable name(s) that starts the whole vulnerability
+        self.source_varnames = source_varnames
 
     def display(self):
+        # potentially collect lineno and asts and print the line of code where it happens
         pass
 
     def __repr__(self):
-        return "Issue $%s -> %s to %s " % (self.source_varname, repr(self.call_chain), self.cf.name)
+        # so ugly, must be better way
+        if len(self.source_varnames) > 1:
+            end = len(self.source_varnames)
+            varnames_display_string = "[ "
+            for v in self.source_varnames:
+                if self.source_varnames.index(v) == (end -1):
+                    varnames_display_string += "$%s" % v
+                else:
+                    varnames_display_string += "$%s, " % v
+            varnames_display_string += " ]"
+        else:
+            varnames_display_string = "$%s" % self.source_varnames[0]
+        return "Issue %s -> %s to %s() in %s" % (varnames_display_string, repr(self.call_chain), self.sinkname, self.cf.name)
 
 
 class NopFilters(UserDict.DictMixin):
@@ -213,7 +201,7 @@ class Engine:
         self.__fn_to_ast = {}
         self.__big_map = {}
         self.__template_dir = None
-        self.perform_jinja_analysis = False
+        self.perform_jinja_analysis = True
 
         self.verbose = False
         self.__detective_mode = False
@@ -236,11 +224,15 @@ class Engine:
         rt_sink = sink("render_template", 1)
         rt_sink.module = "*"
 
+
+        # TODO - a flask.render_template() sink and test
         frt_sink = sink("render_template", 1)
         frt_sink.module = "flask"
 
+        urlopen_sink = sink("urlopen", 0)
+        urlopen_sink.module = "urllib2"
 
-        # TODO - a flask.render_template() sink and test
+
         eval_sink = sink("eval", 0)
         eval_sink.module = "*"
 
@@ -257,7 +249,8 @@ class Engine:
             rt_sink,
             eval_sink,
             json_sink,
-            frt_sink,
+            urlopen_sink,
+            #frt_sink,
             ]
  
 
@@ -593,7 +586,7 @@ class Engine:
         This is performing "bottoms up" or sink-first analysis in contrast to top-down or source-first
         """
 
-        #bottom-taint (sinks), top-taint (sources)
+        # bottom-taint (sinks), top-taint (sources)
         initial_sink_tainted_funcs = [k for (k,v) in self.__big_map.items() if v.has_pri_sink == True]
         if self.__detective_mode:
             print '\n\n%d functions containing an initial sink' % len(initial_sink_tainted_funcs)
@@ -623,14 +616,14 @@ class Engine:
         These variable names are later exploded to find the maximum set of
         variables like this possible via assignments.
 
-        All this code does is:
-        find the variable names that are passed into a sink, at a specific offset. 
-        If we find such a variable name record it and return it for further processing
+        The difficulty here is that arguments to a function can be bare 
+        variables, dicts, the return value of other Calls, Lists, etc so 
+        the goal is to deliver one, or potentially a set, of bare variable names
+        like ["foo", "blah"] that we are certain are function-local (bb-local) 
+        variables that flow into a dangerous sink in a dangerous slot.
 
-        This is made hard as arguments to a function can be bare variables, dicts, etc so most of 
-        the effort here is parsing those variations to deliver one, or potentially a set, of bare variable names
-        like ["foo", "blah"] that we are certain are function-local (bb-local) variables that make it into a dangerous sink in a dangerous
-        "slot". The "slot" is represented by an arg_offset which is just the position of the argument. 
+        The "slot" is the position of the argument represented by arg_offset.
+
         ex:
          sink(a, b, c) and only an argument in c is vulnerable
          blah = "asdf"
@@ -638,16 +631,15 @@ class Engine:
         """
 
         # We return a dict where keys = sinky varnames and values are
-        # the rules that triggered them (for later reporting)
+        # the names of the sinks that triggered them (for later reporting)
         tainted_vars = {}
         for s in incoming_sinks:
             # Get the function-scoped variable name of the argument to our sink
             for n in ast.walk(cf.ast):
                 if isinstance(n, ast.Call):
+
                     # Step 1 - extract the functions name to see if it matches a sink
                     # Function calls can come in a few different forms. 
-
-                    #func_name, arg_offset_pairs = self.parse_call(n)
                     func_name = None
 
                     # First try parsing as some_lib.foo()
@@ -667,74 +659,85 @@ class Engine:
 
                     # TODO - this used to check name and module, but some bare function names
                     # wont work if we do this, I think I would need to change general function
-                    # parsing on the injest()-side to tag all sinks with a default module of *
+                    # parsing on the ingest()-side to tag all sinks with a default module of *
                     #if func_name == s.name and module_name == s.module:
 
                     # We have the function name, see if it matches...
-                    if func_name == s.name:
-                        # We found a match! Now parse out all the different
-                        # styles of arguments it could be passed so we can
-                        # determine what set of variables are passed into it
+                    if func_name != s.name:
+                        continue
 
-                        # Simple argument case, func(a,b,c)
-                        if len(n.args) > 0:
-                            for a in n.args:
-                                if isinstance(a, ast.Name):
-                                    # Sinks define which # argument to themselves matters
-                                    #  ensure we match that in addition to the sink name
-                                    arg_offset = n.args.index(a)
-                                    if arg_offset == s.arg_offset:
-                                        var_name = a.id
-                                        tainted_vars[var_name] = s.name
+                    # We found a match! Now parse out all the different
+                    # styles of arguments it could be passed so we can
+                    # determine what set of variables are passed into it
 
-                                # func(a, request.args.get(), c)
-                                if isinstance(a, ast.Call):
-                                    if self.dangerous_source_assignment(a):
-                                        matches = ["$"]
-                                        self.file_bug(cf, matches)
+                    # Simple argument case, func(a,b,c)
+                    if len(n.args) > 0:
+                        for a in n.args:
+                            if isinstance(a, ast.Name):
+                                # Sinks define which # argument to themselves matters
+                                #  ensure we match that in addition to the sink name
+                                arg_offset = n.args.index(a)
+                                if arg_offset == s.arg_offset:
+                                    var_name = a.id
+                                    tainted_vars[var_name] = s.name
 
-
-
-                                # ex: func(a, b, {"foo" : foo, "bar" : bar})
-                                if isinstance(a, ast.Dict):
-                                    arg_offset = n.args.index(a)
-                                    if arg_offset == s.arg_offset:
-                                        for k in a.keys:
-                                            i = a.keys.index(k)
-                                            v = a.values[i]
-                                            if isinstance(v, ast.Name):
-                                                tainted_vars[v.id] = s.name
-                                            # func(a, {"b" : request.args.get()}, c)
-                                            if isinstance(v, ast.Call):
-                                                if self.dangerous_source_assignment(v):
-                                                    if isinstance(k, ast.Str):
-                                                        matches = [k.s]
-                                                    else:
-                                                        matches = ["$"]
-                                                    self.file_bug(cf, matches)
+                            # func(a, request.args.get(), c)
+                            if isinstance(a, ast.Call):
+                                if self.dangerous_source_assignment(a):
+                                    matches = ["$"]
+                                    self.file_bug(s.name, cf, matches)
 
 
-                        # TODO do something here... do sinks need a list of kwargs that would be tainted? equiv to arg_offset for the simpler cases?
-                        # if they get this, would we handle propagation later during the assingment-checking phase?
-                        # right now we are super/extremely optimistically tainting
-                        # Keyword arguments, func(a="asdf", b="foo", c="bar")
-                        if len(n.keywords) > 0:
-                            for a in n.keywords:
-                                i = n.keywords.index(a)
-                                #print astpp.dump(n)
-                                # keyword(arg='title', value=Name(id='title', ctx=Load()))
-                                if isinstance(a.value, ast.Name):
-                                    sinkvar = a.value.id
-                                    tainted_vars[sinkvar] = s.name
+                            # ex: func(a, b, {"foo" : foo, "bar" : bar})
+                            if isinstance(a, ast.Dict):
+                                arg_offset = n.args.index(a)
+                                if arg_offset == s.arg_offset:
+                                    for k in a.keys:
+                                        i = a.keys.index(k)
+                                        v = a.values[i]
+                                        if isinstance(v, ast.Name):
+                                            tainted_vars[v.id] = s.name
+                                        # func(a, {"b" : request.args.get()}, c)
+                                        if isinstance(v, ast.Call):
+                                            if self.dangerous_source_assignment(v):
+                                                if isinstance(k, ast.Str):
+                                                    matches = [k.s]
+                                                else:
+                                                    matches = ["$"]
+                                                self.file_bug(s.name, cf, matches)
 
-                        if hasattr(n, "kwargs") and isinstance(n.kwargs, ast.Name):
-                            sinkvar = n.kwargs.id
-                            tainted_vars[sinkvar] = s.name
- 
-                        # The sink("asdf", *args) case
-                        if hasattr(n, "starargs"):
-                            # todo someday, do something
-                            pass
+
+                    # TODO do something here... do sinks need a list of kwargs that would be tainted? equiv to arg_offset for the simpler cases?
+                    # if they get this, would we handle propagation later during the assingment-checking phase?
+                    # right now we are super/extremely optimistically tainting
+                    # Keyword arguments, func(a="asdf", b="foo", c="bar")
+                    if len(n.keywords) > 0:
+                        for a in n.keywords:
+                            #print 'arg: ', astpp.dump(a)
+                            i = n.keywords.index(a)
+
+                            # keyword(arg='title', value=Name(id='title', ctx=Load()))
+                            if isinstance(a.value, ast.Name):
+                                sinkvar = a.value.id
+                                tainted_vars[sinkvar] = s.name
+
+                            # sink(foo, a=request.arg,get()) case
+                            # TODO problem... this matches ALL request = keyword args because
+                            if isinstance(a.value, ast.Call):
+                                #print astpp.dump(a)
+                                v = a.value
+                                if self.dangerous_source_assignment(v):
+                                    matches = [a.arg]
+                                    self.file_bug(s.name, cf, matches)
+
+                    if hasattr(n, "kwargs") and isinstance(n.kwargs, ast.Name):
+                        sinkvar = n.kwargs.id
+                        tainted_vars[sinkvar] = s.name
+
+                    # The sink("asdf", *args) case
+                    if hasattr(n, "starargs"):
+                        # todo someday, do something
+                        pass
 
         return tainted_vars
 
@@ -870,7 +873,15 @@ class Engine:
             # matches are the varnames in tainted vars that are also 
             # the lhs on a source assignment
             if matches:
-                self.file_bug(cf, matches)
+
+                # Check the sinks for each of these matches, its expected
+                # they are all for the same sink
+                sinknames = [tainted_vars_to_sinks[m] for m in matches if tainted_vars_to_sinks.has_key(m)]
+                if sinknames:
+                    sinkname = sinknames[0]
+                else:
+                    sinkname = "???"
+                self.file_bug(sinkname, cf, matches)
 
             # Mark ourselves as a dangerous sink if we propagate taint from our args to a sink
             # We now have the full set of tainted vars inside this function that flow to the sink
@@ -925,6 +936,7 @@ class Engine:
                         source_tainted_vars.append(lhs)
 
             # TODO - is this the place to handle nameless/anon variables like {"a" : request.args}?
+            # I think it would be inside a Call()... but not sure
 
             # Handle app.route("/foo/<some_argument>")
             if isinstance(n, ast.FunctionDef) and hasattr(n, "decorator_list"):
@@ -949,13 +961,10 @@ class Engine:
         return matches
 
 
-    def file_bug(self, cf, matches):
-        #print '\n\n!!!!A bug!!!!'
-
-        #source = codegen.to_source(fti.ast)
-        #self.issues_found.append()
-        varname_into_sink = matches[0]
-        #print astpp.dump(self.__big_map[cf]
+    def file_bug(self, sinkname, cf, matches):
+        """ We found a bug! Cut an Issue()
+        """
+        varnames_into_sink = matches
 
         call_chain = [cf.funcname]
         bug_str = "%s() var $%s in " % (cf.funcname, matches[0])
@@ -974,12 +983,8 @@ class Engine:
         
         cf_of_matchpoint = cf
 
-        #source = codegen.to_source(cf.ast)
-        #print repr(source)
-        
-        issue = Issue(cf_of_matchpoint, call_chain, varname_into_sink)
+        issue = Issue(sinkname, cf_of_matchpoint, call_chain, varnames_into_sink)
         self.issues_found.append(issue)
-        #print bug_str
 
 
     def dangerous_source_assignment(self, n):
@@ -999,7 +1004,7 @@ class Engine:
         if isinstance(n, ast.Subscript):
             # xx = request.args['foo']
             if hasattr(n, "value") and hasattr(n.value, "value"):
-                if n.value.value.id == "request":
+                if hasattr(n.value.value, "id") and n.value.value.id == "request":
                     return True
 
             # xx = dictname[some_var_as_key]
@@ -1017,10 +1022,9 @@ class Engine:
 
         # xx = request.args.get('foo') is an ast.Call()
         if isinstance(n, ast.Call):
-            if hasattr(n.func, "value") and hasattr(n.func.value, "value") \
-                    and hasattr(n.func.value.value, 'id'):
-                if n.func.value.value.id == 'request':
-                    return True
+            if hasattr(n.func, "value") and hasattr(n.func.value, "value") and hasattr(n.func.value.value, 'id'):
+                    if n.func.value.value.id == 'request':
+                        return True
 
             #  xxx = flask.request.headers.get('Host')
             if hasattr(n.func, "value") and hasattr(n.func.value, "value") \
@@ -1074,8 +1078,16 @@ class Engine:
                 # handle flask.render_template() case
                 if isinstance(n.func, ast.Attribute):
                     if isinstance(n.func.value, ast.Name):
+                        #print n.func.value.id
+                        #print n.func.attr
                         for s in self.LIST_OF_SINKS:
                             if n.func.value.id == s.module and n.func.attr == s.name:
+                                L.append(s)
+
+                            # XXX Still trying this out... its optimistic taint 
+                            # for the cases where we dont have a module name but do 
+                            # have an attr... decide if keep in or not...
+                            if n.func.attr == s.name:
                                 L.append(s)
         return L
 
@@ -1427,6 +1439,24 @@ class Engine:
 
         return templatename_to_parse_tree
 
+    def find_template_dir(self):
+        # web-p2 is web-p2/partners/templates
+        # login is login/templates
+        # TODO: look for invocations of `jinja2.Environment` and see if
+        # we can pull the template directory / package from there? Should work
+        # for most.
+        template_dirs = set()
+        for root, subdir, files in os.walk(self.__target_dir):
+            for fname in files:
+                fpath = os.path.join(root, fname)
+                if fname.endswith(".html"):
+                    with open(fpath, "rb") as f:
+                        # Hmm, smells like a jinja template!
+                        if b"{%" in f.read():
+                            template_dirs.add(root)
+        # If there are multiple template directories in a repo we might need
+        # repo-specific overrides.
+        return None if not template_dirs else os.path.commonprefix(template_dirs)
 
     def get_unsafe_templateside_variables(self, template_dir = None):
         """
@@ -1451,8 +1481,11 @@ class Engine:
         tn_to_unsafe_vars = self.find_all_safe_filter(tn_to_ast)
         #tn_to_unsafe_vars.append(self.find_all_attribute_xss(tn_to_ast))
         #tn_to_unsafe_vars.append(self.find_all_script_block_xss(tn_to_ast))
-        print 'here it is.......'
-        print repr(tn_to_unsafe_vars)
+        print '\n\nhere it is.......'
+        pp = pprint.PrettyPrinter(depth=6)
+        pp.pprint(tn_to_unsafe_vars)
+        #print repr(tn_to_unsafe_vars)
+        print "\n\n"
         return tn_to_unsafe_vars
 
 
@@ -1649,4 +1682,56 @@ if __name__ == "__main__":
                 4. (future) not have any sanitization functions blocking these paths
 
 """
+
+"""
+
+    
+
+TODO:
+    * Make auditor mode that just shows areas of interest, lots of request. or whatnot
+    * Run against taishan, login, free-candy
+    * Make it gracefully handle api/, run against it, learn stuff, improve
+
+    * DONE - Break up giant jinja2 xss rule into a big sink rule that gets interesting variables from the jinja2 but is otherwise just like the eval() test
+    * LOTS MORE TESTS
+    * add def/use for variables that are tainted but then redefined and safe
+    * Handle binOp cases where x = TAINTED; x = x + "some string"; eval(x)
+    * Handle eval("foo bar baz %s" % x) case, x = tainted
+    * Look through old bugs to find actual good sinks, json.dumps()? requests? urllib?
+
+
+TODO:
+    * Enhance jinja2 template parsing code to not only look at |safe but any variable that goes into a <script> block
+
+
+README:
+    focuson is a flow-insensitive, intra-procedural dataflow-based program analysis tool for python. Its aim is to find likely areas for security engineers to review for bugs. 
+    In the future it will hopefully become inter-procedural and possibly flow-sensitive
+
+
+
+Rule families
+
+1. Ast rules. Simple as they operate upon the AST
+2. CFG rules. Don't know of any but they might exist, maybe around toctou or race conditions on files?
+3. Dataflow rules. xss/sqli/etc
+4. Human - blacklist of people who write bugs, interns, new people etc
+5. Experimential - codebase analysis, person x commits to this area a bunch but this is their first commit to area y.
+
+
+Specific future rules to write
+1. <script> inside an .html template, see login/templates/analytics.html and login/views/base.py. Send to human.
+example: https://code.uberinternal.com/D220082
+2. Copy robs rule around making a new jinja2 env since its easy to try, and fail, to turn on auto-escaping
+3. Robs sqli examples
+4. Add more to template xss rule, can also be done this way:
+    template = Template(survey.message)
+    final_message = template.render(url=final_url)
+5. HTTP response splitting
+6. XXE
+7. yaml.load() https://code.uberinternal.com/D207794
+8. pickle.load, http://kevinlondon.com/2015/08/15/dangerous-python-functions-pt2.html
+9. Robs existing bandit rule for new jinja2 environs
+"""
+
 

@@ -1,7 +1,20 @@
 @app.route('/archive')
-def sortarchive(blah):
-    current_order_by = request.args.get('order_by')
-    reverse = request.args.get('reverse')
+def archive():
+    def sortarchive(order_by):
+        current_order_by = request.args.get('order_by')
+        reverse = request.args.get('reverse')
+        if order_by == current_order_by:
+            if reverse is None:
+                reverse = False
+            try:
+                reverse = bool(int(reverse))
+            except ValueError:
+                reverse = False
+            reverse = int(not reverse)
+        return url_for('archive', order_by=order_by,
+            reverse=reverse,
+            start=request.args.get('start'),
+            limit=request.args.get('limit'))
 
     order_by = {
         'date': JobPost.datetime,
@@ -9,8 +22,6 @@ def sortarchive(blah):
         'company': JobPost.company_name,
         'location': JobPost.location,
         }.get(request.args.get('order_by'))
-
-    posts = request.args.get('reverse')
     reverse = request.args.get('reverse')
     start = request.args.get('start', 0)
     limit = request.args.get('limit', 100)
