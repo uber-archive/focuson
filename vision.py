@@ -76,7 +76,7 @@ class Issue:
             varnames_display_string += " ]"
         else:
             varnames_display_string = "$%s" % self.source_varnames[0]
-        return "Issue %s -> %s to %s() in %s" % (varnames_display_string, repr(self.call_chain), self.sinkname, self.cf.name)
+        return "%s -> %s to %s() in %s" % (varnames_display_string, repr(self.call_chain), self.sinkname, self.cf.name)
 
 
 class NopFilters(UserDict.DictMixin):
@@ -1481,11 +1481,10 @@ class Engine:
         tn_to_unsafe_vars = self.find_all_safe_filter(tn_to_ast)
         #tn_to_unsafe_vars.append(self.find_all_attribute_xss(tn_to_ast))
         #tn_to_unsafe_vars.append(self.find_all_script_block_xss(tn_to_ast))
-        print '\n\nhere it is.......'
-        pp = pprint.PrettyPrinter(depth=6)
-        pp.pprint(tn_to_unsafe_vars)
-        #print repr(tn_to_unsafe_vars)
-        print "\n\n"
+
+        #pp = pprint.PrettyPrinter(depth=6)
+        #pp.pprint(tn_to_unsafe_vars)
+        #print "\n\n"
         return tn_to_unsafe_vars
 
 
@@ -1661,7 +1660,7 @@ def main():
     engine.process_funcs()
     engine.main_analysis()
     for i in engine.issues_found:
-        print i
+        print "\t", i
 
 if __name__ == "__main__":
     main()
