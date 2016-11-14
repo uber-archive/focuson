@@ -1,29 +1,42 @@
-Focusin - A python static analysis tool to help find security flaws
+Focusin is a tool to find security bugs in python web applications. 
 
-http://simpsons.wikia.com/wiki/Focusyn
+It uses dataflow analysis to model security flaws like xss, sqli, ssrf
+as instances of a source (user input) flowing to a sink (dangerous function).
 
+It has been used at Uber to surface security flaws in our python applications.
+It is most useful for python + flask web applications but rules can be written
+to expand that scope. 
 
-Goal: Finding security flaws in software is hard work - the goal of focusin is to give you an educated selection of areas in a python codebase to start looking. For microservices or websites a security audit would naturally focus on a subset of areas:
+Background
+Focusin helps the uber product security team figure out what areas to focus on
+in a massive codebase. Many security issues (xss, sqli, rce) can be modelled 
+as data flowing from a source (user-controlled input) to a sink (the dangerous
+function that accepting user input). 
 
-1. All functions that can be hit from the internet. ex: have app.route() decorators 
-2. All of those internet-routable functions that also have any user input. ex: have an assignment like ```foo = request.args.get("foo") ```
-3. All of the set of functions that pass #1 and #2 that also have a call to a function that renders html. ex: ``` flask.render_template() ```
+Focusin has found multiple real security flaws with this methodology at Uber.
 
-focusin lets you construct queries like the above to narrow down where you would want to look first.
+The expectation is focusin will show you areas a security engineer should
+investigate more deeply with a good signal to noise ratio but will rarely
+be able to say with 100% certainty there is a security flaw. 
 
-Focusin takes inspiration from toosl like 
-https://github.com/facebook/pfff
-and
-http://www.mlsec.org/joern/
+Installation
 
-Usage:
+Usage
 1. source venv/bin/activate
-2. python vision.py ~/src/free-candy/freecandy
+2. python vision.py <dir containting source code>
 
-Supported targets
-* Any python flask code
-* Api code
 
-Results:
-A high confidence issue looks like: TAINTED var "iphone_fallback_link" to @templated in /Users/collin/src/web-p2/partners/views/mobile_app.py +358
-An area to manually explore looks like:/Users/collin/src/web-p2/partners/views/dashboard.py +195 templated() vars: ['inputs', 'translations']
+Changes
+Focusin is customized for uber, to make it useful you will need to identify
+the set of relevant sinks for your codebase and add them in. This should be
+around line xxx
+
+Future work
+Good future work would be adding additional sources and sinks, make the parsing
+of the AST more precise and write additional tests. 
+
+Inspiration
+* https://github.com/facebook/pfff
+* http://www.mlsec.org/joern/
+* https://github.com/openstack/bandit
+* http://simpsons.wikia.com/wiki/Focusyn

@@ -3,7 +3,6 @@
 import sys
 import os
 import ast
-import subprocess
 import UserDict
 
 import codegen
@@ -37,9 +36,9 @@ import pprint
     mostly useful only for flask applications.
 
     Glossary
+    ast - abstract syntax tree
     "cf" - current function. 
     primary - idea of primary source or sink is that it is in the current function
-
     
 """
 
@@ -225,7 +224,7 @@ class Engine:
         rt_sink.module = "*"
 
 
-        # TODO - a flask.render_template() sink and test
+        # flask.render_template() sink 
         frt_sink = sink("render_template", 1)
         frt_sink.module = "flask"
 
@@ -447,7 +446,13 @@ class Engine:
         """
         Take all the asts for each python file ingested and create a new dict, big_map, 
         keyed off the function name and whose values are a bundle of useful info for taint analysis
+
+
+        This determines module imports and function/method calls across both
+        files and classes. This info is the raw material needed to do dataflow
+        analysis later. 
         """
+
         if not self.__fn_to_ast.keys() > 0:
             raise Exception("No asts parsed from filenames to analyze")
         
