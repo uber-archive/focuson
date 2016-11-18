@@ -19,7 +19,7 @@ help:
 env:
 	virtualenv --setuptools $@
 	$@/bin/pip install -U "setuptools>=19,<20"
-	$@/bin/pip install -U "pip>=7,<8"
+	$@/bin/pip install -U "pip>=8,<9"
 	$@/bin/pip install -U "pip-tools>=1.6.0,<2"
 
 # sentinel file to ensure installed requirements match current specs
