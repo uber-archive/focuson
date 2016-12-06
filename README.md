@@ -3,7 +3,7 @@
 
 == Overview
 
-Focusin is a tool to find security bugs in python web applications. 
+Focuson is a tool to find security bugs in python web applications. 
 Primarily flask + jinja web applications and primarily XSS. It was written
 as an experiment in response to the Uber Product Security team manually finding
 many XSS bugs in our codebase and wanting a way to scalably find them. 
@@ -11,8 +11,8 @@ many XSS bugs in our codebase and wanting a way to scalably find them.
 It uses dataflow analysis to model security flaws like xss, sqli, ssrf
 as instances of a source (user input) flowing to a sink (dangerous function).
 
-Focusin is best thought of as a dataflow framework for python upon which
-rules can be written. While you can run focusin directly you should expect
+Focuson is best thought of as a dataflow framework for python upon which
+rules can be written. While you can run focuson directly you should expect
 to write custom rules for your codebase to find the types of security
 flaws you would expect to lurk within. 
 
@@ -24,7 +24,7 @@ the issue.
 
 == Background
 
-Focusin is a path-insensitive, inter-functional dataflow analysis.
+Focuson is a path-insensitive, inter-functional dataflow analysis.
 
 Path-insensitive = ignores the control flow (if/then/else/etc)
 inter-functional = "tracks" variables across functions, not just within
@@ -36,16 +36,16 @@ able to predict ahead of time how the program runs, which we know is
 undecidable so focuson, and any program analysis tool, is best considered a
 collection of approximations to mine insight into how the program will execute. 
 
-The expectation is focusin will show you areas a security engineer should
+The expectation is focuson will show you areas a security engineer should
 investigate more deeply with a good signal to noise ration
 
-Focusin runs quickly, in testing taking ~15 sec for 100kb of python.
+Focuson runs quickly, in testing taking ~15 sec for 100kb of python.
 == Installation
 foo bar baz
 
 == Usage
 1. source venv/bin/activate
-2. python focusin.py <dir containting source code>
+2. python focuson.py <dir containting source code>
 
 
 
@@ -76,7 +76,8 @@ For more examples like this see the test directory
 
 
 == How to make focuson useful
-Focusin is customized for Uber's codebase.
+Focuson is customized for Uber's codebase.
+
 To make it useful you will need to identify relevant set of sources and sinks 
 for your codebase. Some of these are globally true and already built-in, 
 like eval() as a sink for RCE.

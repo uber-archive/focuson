@@ -143,7 +143,6 @@ class TestInOneFileDataflow(unittest.TestCase):
         Test that the different variations of request.args all work
         """
         import ast
-        import astpp
         one = "summary_days = request.args.get('summary_days', type=int)"
         one_tree = ast.parse(one)
         subtree = one_tree.body[0].value
