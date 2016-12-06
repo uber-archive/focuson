@@ -4,17 +4,15 @@
 == Overview
 
 Focuson is a tool to find security bugs in python web applications. 
-Primarily flask + jinja web applications and primarily XSS. It was written
-as an experiment in response to the Uber Product Security team manually finding
-many XSS bugs in our codebase and wanting a way to scalably find them. 
 
-It uses dataflow analysis to model security flaws like xss, sqli, ssrf
-as instances of a source (user input) flowing to a sink (dangerous function).
+It uses dataflow analysis to model security flaws like xss as instances
+of a source (user input) flowing to a sink (dangerous function).
 
-Focuson is best thought of as a dataflow framework for python upon which
-rules can be written. While you can run focuson directly you should expect
-to write custom rules for your codebase to find the types of security
-flaws you would expect to lurk within. 
+
+While mostly useful primarily for flask + jinja apps it can be extended to 
+include other frameworks. Focuson will be most useful not as a tool to be run 
+once but a framework upon which to build your own set of security rules
+applicable to your codebase. 
 
 Uber now uses focuson to automatically to surface probable security issues
 to the security team or, given high confidence, back to the engineer that wrote
@@ -24,7 +22,12 @@ the issue.
 
 == Background
 
-Focuson is a path-insensitive, inter-functional dataflow analysis.
+Focuson was started as an experiment to find XSS in flask + jinja web 
+applications at Uber. It ended up being useful so we have extended it a 
+bit over time but it is still very raw. 
+
+
+Focuson is a path-insensitive, inter-functional dataflow analysis engine. 
 
 Path-insensitive = ignores the control flow (if/then/else/etc)
 inter-functional = "tracks" variables across functions, not just within
@@ -40,6 +43,7 @@ The expectation is focuson will show you areas a security engineer should
 investigate more deeply with a good signal to noise ration
 
 Focuson runs quickly, in testing taking ~15 sec for 100kb of python.
+
 == Installation
 foo bar baz
 
@@ -99,17 +103,3 @@ Lots of additional good work to be done.
 * http://www.mlsec.org/joern/
 * https://github.com/openstack/bandit
 * http://simpsons.wikia.com/wiki/Focusyn
-
-
-===================
-
-It differs from existing tools like Bandit in that it is higher signal and more
-customizable - the real key is that it uses dataflow analysis to attempt to
-"follow" variables through the code. 
-
-
-It has been used at Uber to surface security flaws in our python applications.
-It currently supports  python + flask web applications but rules can be written
-to expand that scope. 
-
-
