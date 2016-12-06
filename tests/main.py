@@ -3,9 +3,8 @@ sys.path.append("..")
 
 import os
 import unittest
-#import mock
 
-from vision import Engine 
+from focuson import Engine 
 
 class TestInOneFileDataflow(unittest.TestCase):
     def setUp(self):
@@ -18,7 +17,6 @@ class TestInOneFileDataflow(unittest.TestCase):
         """
         Worlds simplist vuln:
         eval(request.args.get("foo"))
-
         """
         target_dir = os.getcwd() + os.sep + "simple_inline"
         self.engine.ingest(target_dir)
@@ -37,8 +35,6 @@ class TestInOneFileDataflow(unittest.TestCase):
         self.engine.main_analysis()
         self.assertTrue(len(self.engine.issues_found) == 1)
         self.assertEqual(self.engine.issues_found[0].cf.name, "main::func_seven")
-
-
 
     def test_simpleEval(self):
         """

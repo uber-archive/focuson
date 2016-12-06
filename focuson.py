@@ -241,7 +241,8 @@ class Engine:
         json_sink = sink("jsonify", 0)
 
 
-        # TODO, could there be multiple rules attached to a sink? web-p2..login..api..etc? all need to handle render_template for instance...
+        # TODO, could there be multiple rules attached to a sink? 
+        # All need to handle render_template for instance...
         self.LIST_OF_SINKS = [
             ehc_sink,
             esc_sink,
@@ -662,10 +663,13 @@ class Engine:
                         module_name = "*"
 
 
-                    # TODO - this used to check name and module, but some bare function names
+                    # note - this used to check name and module, but some bare function names
                     # wont work if we do this, I think I would need to change general function
                     # parsing on the ingest()-side to tag all sinks with a default module of *
                     #if func_name == s.name and module_name == s.module:
+                    #    pass
+                    #else:
+                    #    continue
 
                     # We have the function name, see if it matches...
                     if func_name != s.name:
@@ -712,13 +716,13 @@ class Engine:
                                                 self.file_bug(s.name, cf, matches)
 
 
-                    # TODO do something here... do sinks need a list of kwargs that would be tainted? equiv to arg_offset for the simpler cases?
+                    # TODO refactor/improve... do sinks need a list of kwargs that would be tainted? equiv to arg_offset for the simpler cases?
                     # if they get this, would we handle propagation later during the assingment-checking phase?
-                    # right now we are super/extremely optimistically tainting
+                    # right now we are very optimistically tainting. In testing this has shown to be valuable but something to be aware of
+
                     # Keyword arguments, func(a="asdf", b="foo", c="bar")
                     if len(n.keywords) > 0:
                         for a in n.keywords:
-                            #print 'arg: ', astpp.dump(a)
                             i = n.keywords.index(a)
 
                             # keyword(arg='title', value=Name(id='title', ctx=Load()))
@@ -741,7 +745,7 @@ class Engine:
 
                     # The sink("asdf", *args) case
                     if hasattr(n, "starargs"):
-                        # todo someday, do something
+                        # Unhandled for now, its rare in practice, todo someday
                         pass
 
         return tainted_vars
@@ -940,7 +944,7 @@ class Engine:
                     if self.dangerous_source_assignment(rhs):
                         source_tainted_vars.append(lhs)
 
-            # TODO - is this the place to handle nameless/anon variables like {"a" : request.args}?
+            # TODO - handle nameless/anon variables like {"a" : request.args}?
             # I think it would be inside a Call()... but not sure
 
             # Handle app.route("/foo/<some_argument>")
@@ -1003,7 +1007,7 @@ class Engine:
             return False
 
         if isinstance(n, ast.Dict):
-            "print other side is a dict............."
+            # other side is a Dict
             return False
 
         if isinstance(n, ast.Subscript):
@@ -1089,7 +1093,7 @@ class Engine:
                             if n.func.value.id == s.module and n.func.attr == s.name:
                                 L.append(s)
 
-                            # XXX Still trying this out... its optimistic taint 
+                            # TODO Still trying this out... its optimistic taint 
                             # for the cases where we dont have a module name but do 
                             # have an attr... decide if keep in or not...
                             if n.func.attr == s.name:
@@ -1108,30 +1112,17 @@ class Engine:
     
 
     def wrangle_classname_from_call(self, n):
+        """ 
+        We have a Call() instance and need to figure out the classname of
+        object being called. This is hard, so we guess and hope for the best. 
+        There are likely many code patterns where this fails, in practice this
+        simplistic extraction worked for anything thrown at it 
+        """
 
-        #print 'wrangling.........'
-        #print astpp.dump(n)
         if isinstance(n, ast.Name):
             return n.id
         if isinstance(n, ast.Attribute):
             return None
-            # ugggghhh, no "correct" answer here. 
-            # Need to spend time teasing out all the variations here but start with the above to progress for now
-            #return n.value.id
-            #Examples of one that breaks
-            #<_ast.Call object at 0x10d819ed0>
-            #wrangling.........
-            #Attribute(value=Attribute(value=Name(id='request', ctx=Load()), attr='args', ctx=Load()), attr='get', ctx=Load())
-        """
-        Two examples
-        Call(func=Attribute(value=Name(id='flask', ctx=Load()), attr='Flask', ctx=Load()), args=[
-            Name(id='__name__', ctx=Load()),
-          ], keywords=[], starargs=None, kwargs=None)
-
-        Call(func=Name(id='TemporaryToken', ctx=Load()), args=[
-            Name(id='user', ctx=Load()),
-          ], keywords=[], starargs=None, kwargs=None)
-        """
 
     def get_outgoing_calls(self, fti):
         """ 
@@ -1154,7 +1145,6 @@ class Engine:
 
         assert type(fti.ast) == ast.FunctionDef
         #print 'Figuring out calls for ', fti.name
-
         #source = codegen.to_source(fti.ast)
 
 
@@ -1257,9 +1247,6 @@ class Engine:
                                 # a function/class/method/etc
                                 key = self.get_key_from_info(method_name, class_of_varname)
 
-                                # TODO get this working instead of above, its more elegant......
-                                #(key, _) = self.gen_unique_key(fti.fn, method_name, class_of_varname)
-                                #print 'genned key......', key
                                 if self.__big_map.has_key(key):
                                     outgoing_calls.append(key)
 
@@ -1288,75 +1275,6 @@ class Engine:
         for k,v in self.__big_map.items():
             if v.class_name == class_name and v.funcname == funcname:
                 return k
-
-
-    def get_fn_from_call(self, fti):
-        L = []
-
-        # Step 2 - analyze all the Call()s
-        # Handle all the different forms, function call, a call to a method on a class, etc
-        outgoing_calls = []
-        for n in ast.walk(fti.ast):
-            if isinstance(n, ast.Call):
-
-                # Calls() are often Names or Attribute nodes
-                # Names are generally the easier of the two
-                if isinstance(n.func, ast.Name):
-                    funcname = n.func.id
-                    #print 'Call(easy).......', repr(funcname)
-
-                    # A big blacklist of functions that if there is a Call() instance to, we dont care
-                    # This is for things we know are safe or happen often and are likely safe
-                    # Currently this is mostly _ (translation function) and things prefaced with test_
-                    if funcname == "_" or funcname.startswith("test_"):
-                        continue
-
-                    # This is *really* permissive, if anywhere in the project we find a function
-                    # named the same as one we call, toss it in. 
-                    for k,v in self.__big_map.items():
-                        if funcname == v.funcname:
-                            outgoing_calls.append(k)
-
-
-
-                # The trickiest case
-                if isinstance(n.func, ast.Attribute):
-                    if hasattr(n.func.value, "id"):
-                        #print 'Call(hard)........',repr(n.func.value.id)
-
-                        # l2 = someClass(); l2.someMethod()
-                        # lhs_instance_vn = "l2"
-                        lhs_instance_vn = n.func.value.id
-
-                        # Case of "self.someFunc()" calls the lhs will be "self"
-                        # so use the class within which this function lives
-                        if lhs_instance_vn == "self":
-                            method_name = n.func.attr
-                            key = self.get_key_from_info(method_name, fti.class_name)
-                            if self.__big_map.has_key(key):
-                                outgoing_calls.append(key)
-
-                        if lhs_instance_vn in fti.class_instance_varnames:
-                            class_of_varname = fti.class_pairs[lhs_instance_vn]
-                            # We now have the class whose method we are calling
-                            # Look it up in the big map so we can link these
-
-                            method_name = n.func.attr
-
-                            if method_name in self.METHOD_BLACKLIST:
-                                continue
-
-                            if class_of_varname and method_name:
-                                # make this a func that returns a key into the big map given some info about
-                                # a function/class/method/etc
-                                key = self.get_key_from_info(method_name, class_of_varname)
-
-                                # TODO get this working instead of above, its more elegant......
-                                #(key, _) = self.gen_unique_key(fti.fn, method_name, class_of_varname)
-                                #print 'genned key......', key
-                                if self.__big_map.has_key(key):
-                                    outgoing_calls.append(key)
-
 
 
     def gen_module_name(self, python_filename):
@@ -1521,7 +1439,7 @@ class Engine:
         """
 
 
-        # THINGS TO LOOK FOR AT THIS STAGE
+        # Things to look for at this stage:
         # attribute-based xss:   <input type="{{field_type}}" class="text-input" name="{{field_name or label}}" value="{{value}}" placeholder="{{label or field_name}}"></input>
         # <script>block based xss
 
@@ -1587,7 +1505,7 @@ class Engine:
         #  and we are only operating upon instances where there is a |safe filter anyway so we prefer to lose the precision and cast the net more widely. 
 
 
-        # format: {'foo/template_foo.html' : ['var_blah', 'var_doo']}
+        # format: {'foo/template_foo.html' : ['var_blah', 'var_foo']}
 
         for (tn, dangerous_var_name) in unsafe_tn_vn_pairs:
             confirmed_dangerous_var_names = []
@@ -1615,7 +1533,7 @@ class Engine:
                                             else:
                                                 final_unsafe_tn_vn_pairs[tn].append(confirmed_dangerous_vn)
 
-        #print '44444444444444444444444444444..........' + repr(final_unsafe_tn_vn_pairs)
+        #print 'step 4: ' + repr(final_unsafe_tn_vn_pairs)
 
 
         # The ones we parse from the ast come in the form 'signup/foo.html'. Remove leading path info so they can potentially match
@@ -1653,7 +1571,6 @@ def main():
     parser.add_argument("-f", "--full", action="store_true", default=False, help="return full (unconfirmed) results")
     parser.add_argument("-v", "--verbose", action="store_true", default=False, help="increase verbosity")
     parser.add_argument("-d", "--detective", action="store_true", default=False, help="Detective mode")
-    #parser.add_argument("-t", "--targets", action="store_true", default=False, help="target function name")
     args = parser.parse_args()
 
     target_dir = args.dir
