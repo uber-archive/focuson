@@ -143,7 +143,7 @@ class functionTaintInfo:
     """
     This structure collects all the info we need to track tainting in/out/through a function
 
-    This is the more specialized conceptual equal to a basic block. 
+    This is a more specialized conceptual equal to a basic block. 
     """
     def __init__(self, name, ast=None):
 
@@ -1664,78 +1664,9 @@ def main():
     engine.ingest(target_dir)
     engine.process_funcs()
     engine.main_analysis()
+
     for i in engine.issues_found:
         print "\t", i
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-"""
-            rough notes from whiteboard + pacing
-            main() -> three() -> four() -> five()
-            five() contains mysql_query()
-            near/far analysis, near = do I contain a request.whatever?
-            far = do I:
-                1. have people that call me
-                2. take arguments
-                3. have assignments/etc that allow any of my arguments to pass to my sink, which could actually just be a call to a function we know has throughtaint (ttaint)
-                4. (future) not have any sanitization functions blocking these paths
-
-"""
-
-"""
-
-    
-
-TODO:
-    * Make auditor mode that just shows areas of interest, lots of request. or whatnot
-    * Run against taishan, login, free-candy
-    * Make it gracefully handle api/, run against it, learn stuff, improve
-
-    * DONE - Break up giant jinja2 xss rule into a big sink rule that gets interesting variables from the jinja2 but is otherwise just like the eval() test
-    * LOTS MORE TESTS
-    * add def/use for variables that are tainted but then redefined and safe
-    * Handle binOp cases where x = TAINTED; x = x + "some string"; eval(x)
-    * Handle eval("foo bar baz %s" % x) case, x = tainted
-    * Look through old bugs to find actual good sinks, json.dumps()? requests? urllib?
-
-
-TODO:
-    * Enhance jinja2 template parsing code to not only look at |safe but any variable that goes into a <script> block
-
-
-README:
-    focuson is a flow-insensitive, intra-procedural dataflow-based program analysis tool for python. Its aim is to find likely areas for security engineers to review for bugs. 
-    In the future it will hopefully become inter-procedural and possibly flow-sensitive
-
-
-
-Rule families
-
-1. Ast rules. Simple as they operate upon the AST
-2. CFG rules. Don't know of any but they might exist, maybe around toctou or race conditions on files?
-3. Dataflow rules. xss/sqli/etc
-4. Human - blacklist of people who write bugs, interns, new people etc
-5. Experimential - codebase analysis, person x commits to this area a bunch but this is their first commit to area y.
-
-
-Specific future rules to write
-1. <script> inside an .html template, see login/templates/analytics.html and login/views/base.py. Send to human.
-example: https://code.uberinternal.com/D220082
-2. Copy robs rule around making a new jinja2 env since its easy to try, and fail, to turn on auto-escaping
-3. Robs sqli examples
-4. Add more to template xss rule, can also be done this way:
-    template = Template(survey.message)
-    final_message = template.render(url=final_url)
-5. HTTP response splitting
-6. XXE
-7. yaml.load() https://code.uberinternal.com/D207794
-8. pickle.load, http://kevinlondon.com/2015/08/15/dangerous-python-functions-pt2.html
-9. Robs existing bandit rule for new jinja2 environs
-"""
-
-
