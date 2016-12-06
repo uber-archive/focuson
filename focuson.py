@@ -6,7 +6,7 @@ import ast
 import UserDict
 
 import codegen
-import astpp
+import lib.astpp as astpp
 import jinja2
 
 import pprint
