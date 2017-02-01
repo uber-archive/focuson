@@ -1,13 +1,12 @@
-
-
-
 == Overview
 
-Focuson is a tool to find security bugs in python web applications. 
+Focuson is an experimental tool to find security bugs in flask-based pythong
+web applications. It will likely require some manual effort to find bugs in 
+your environment but has been used to regularly find bugs by the uber product
+security team in its current state. 
 
 It uses dataflow analysis to model security flaws like xss as instances
 of a source (user input) flowing to a sink (dangerous function).
-
 
 While mostly useful primarily for flask + jinja apps it can be extended to 
 include other frameworks. Focuson will be most useful not as a tool to be run 
@@ -18,6 +17,7 @@ Uber now uses focuson to automatically to surface probable security issues
 to the security team or, given high confidence, back to the engineer that wrote
 the issue. 
 
+Improvements are much appreciated. 
 
 
 == Background
@@ -51,7 +51,24 @@ foo bar baz
 1. source venv/bin/activate
 2. python focuson.py <dir containting source code>
 
+== Output
+The output from focuson isn't exactly intuitive but follows the format of
 
+$variablename -> [optional number of functions] -> sink-y area of code
+
+$variablename is straightforward
+
+The middle part is meant to show all the functions through which the tainted
+variable passes en route to the sink. 
+
+The final section is the part of the code where the chain of taintedness ends.
+
+Example: mobileapp::fourth
+This means in mobileapp.py, in the function fourth() exists a sink that
+focuson believes constitutes a vulnerability.
+
+For many more examples of output see the test directory and print out the
+variables being asserted. 
 
 == Examples
 

@@ -1,0 +1,10 @@
+bulbs==0.3.29.post20140417
+codegen==1.0
+httplib2==0.9.2
+Jinja2==2.8
+MarkupSafe==0.23
+omnijson==0.1.2
+python-dateutil==1.5
+PyYAML==3.11
+six==1.10.0
+wheel==0.24.0

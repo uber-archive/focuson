@@ -6,6 +6,15 @@ import unittest
 
 from focuson import Engine 
 
+
+"""
+All these tests load .py files from this directory and run analysis upon them
+
+It can be instructive to play around with them and tweak them to be vulnerable
+or not. Its also useful to copy them to test adding a new source or sink as 
+a rule.
+"""
+
 class TestInOneFileDataflow(unittest.TestCase):
     def setUp(self):
         self.engine = Engine()
