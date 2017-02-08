@@ -103,7 +103,7 @@ For more examples like this see the test directory
 
 
 
-== How to make focuson useful
+## How to make focuson useful
 Focuson is customized for Uber's codebase.
 
 To make it useful you will need to identify a relevant set of sources and sinks
@@ -115,14 +115,14 @@ user-controlled input looks like for your codebase and add it as a source
 
 You will need to do the same for sinks. 
 
-== Improvements
+## Improvements
 Lots of additional good work to be done. 
 - Adding additional sources and sinks
 - Refactoring sink() idea to generalized rule()
 - Make output less cryptic
 - Add support for web frameworks beyond flask
 
-== Inspiration
+## Inspiration
 * https://github.com/facebook/pfff
 * http://www.mlsec.org/joern/
 * https://github.com/openstack/bandit
