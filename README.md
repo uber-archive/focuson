@@ -79,24 +79,31 @@ variables being asserted.
 ## Examples
 
 Worlds simplest RCE in python:
+```
 eval(request.args.get("foo"))
+```
 
 More complex
+```
 foo = request.args.get("foo")
 eval(foo)
+```
 
 More complex
+```
 foo = request.args.get("foo")
 bar = foo
 eval(bar)
+```
 
 Yet more complex:
-
+```
 def func1(arg1):
     eval(arg1)
 foo = request.args.get("foo")
 bar = foo
 func1(bar)
+```
 
 For more examples like this see the test directory
 
