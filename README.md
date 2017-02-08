@@ -1,6 +1,6 @@
 ## Overview
 
-Focuson is an experimental tool to find security bugs in flask-based pythong
+Focuson is an experimental tool to find security bugs in flask-based python
 web applications. It will emit a list of places for a security engineer to 
 investigate with a reasonable signal to noise ratio on account of using
 dataflow analysis. 
