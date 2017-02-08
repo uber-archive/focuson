@@ -45,7 +45,12 @@ investigate more deeply with a good signal to noise ration
 Focuson runs quickly, in testing taking ~15 sec for 100kb of python.
 
 == Installation
-foo bar baz
+1. cd focuson
+2. virtualenv venv
+3. source venv/bin/activate
+4. pip install -r requirements.tst
+5. python focuson.py <dir>
+
 
 == Usage
 1. source venv/bin/activate
