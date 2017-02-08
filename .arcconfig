@@ -1,6 +1,0 @@
-{
-  "project_id": "engsec/pastgrep",
-  "conduit_uri": "https://code.uberinternal.com/",
-  "git.default-relative-commit": "origin/master",
-  "history.immutable": false
-}
