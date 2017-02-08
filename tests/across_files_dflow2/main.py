@@ -59,5 +59,3 @@ def second(arg1, arg2):
 
 if __name__ == "__main__":
     main_alt_2()
-
-
