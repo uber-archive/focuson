@@ -1,8 +1,8 @@
-== Overview
+## Overview
 
 Focuson is an experimental tool to find security bugs in flask-based pythong
 web applications. It will likely require some manual effort to find bugs in 
-your environment but has been used to regularly find bugs by the uber product
+your environment but has been used to regularly find bugs by the Uber product
 security team in its current state. 
 
 It uses dataflow analysis to model security flaws like xss as instances
@@ -17,15 +17,17 @@ Uber now uses focuson to automatically to surface probable security issues
 to the security team or, given high confidence, back to the engineer that wrote
 the issue. 
 
+Focuson is used as one stage of our application security pipeline and over 
+time we expect to write more rules to make it more useful.
+
 Improvements are much appreciated. 
 
 
-== Background
+##  Background
 
 Focuson was started as an experiment to find XSS in flask + jinja web 
 applications at Uber. It ended up being useful so we have extended it a 
 bit over time but it is still very raw. 
-
 
 Focuson is a path-insensitive, inter-functional dataflow analysis engine. 
 
@@ -44,7 +46,7 @@ investigate more deeply with a good signal to noise ration
 
 Focuson runs quickly, in testing taking ~15 sec for 100kb of python.
 
-== Installation
+## Installation
 1. cd focuson
 2. virtualenv venv
 3. source venv/bin/activate
@@ -52,11 +54,11 @@ Focuson runs quickly, in testing taking ~15 sec for 100kb of python.
 5. python focuson.py <dir>
 
 
-== Usage
+## Usage
 1. source venv/bin/activate
 2. python focuson.py <dir containting source code>
 
-== Output
+## Output
 The output from focuson isn't exactly intuitive but follows the format of
 
 $variablename -> [optional number of functions] -> sink-y area of code
@@ -75,9 +77,9 @@ focuson believes constitutes a vulnerability.
 For many more examples of output see the test directory and print out the
 variables being asserted. 
 
-== Examples
+## Examples
 
-Worlds simpliest RCE in python:
+Worlds simplest RCE in python:
 eval(request.args.get("foo"))
 
 More complex
@@ -104,7 +106,7 @@ For more examples like this see the test directory
 == How to make focuson useful
 Focuson is customized for Uber's codebase.
 
-To make it useful you will need to identify relevant set of sources and sinks 
+To make it useful you will need to identify a relevant set of sources and sinks
 for your codebase. Some of these are globally true and already built-in, 
 like eval() as a sink for RCE.
 
