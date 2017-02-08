@@ -1,9 +1,13 @@
 ## Overview
 
 Focuson is an experimental tool to find security bugs in flask-based pythong
-web applications. It will likely require some manual effort to find bugs in 
-your environment but has been used to regularly find bugs by the Uber product
-security team in its current state. 
+web applications. It will emit a list of places for a security engineer to 
+investigate with a reasonable signal to noise ratio on account of using
+dataflow analysis. 
+
+It will require manual effort to find bugs in your environment but has been 
+used to regularly find bugs by the Uber product security team in its 
+current state. 
 
 It uses dataflow analysis to model security flaws like xss as instances
 of a source (user input) flowing to a sink (dangerous function).
@@ -16,11 +20,6 @@ applicable to your codebase.
 Uber now uses focuson to automatically to surface probable security issues
 to the security team or, given high confidence, back to the engineer that wrote
 the issue. 
-
-Focuson is used as one stage of our application security pipeline and over 
-time we expect to write more rules to make it more useful.
-
-Improvements are much appreciated. 
 
 
 ##  Background
