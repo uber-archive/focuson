@@ -105,8 +105,12 @@ bar = foo
 func1(bar)
 ```
 
-For more examples like this see the test directory
-
+A good sized example is to run
+```
+python focuson.py tests/simple_4_hop/
+$android_deep_link -> ['first_layer', 'second', 'third', 'fourth'] to second() in mobile_app::fourth
+```
+The output here designates that the variable $android_deep_link is user-controlled and flows through those 4 functions on its path to the function second() which contains a vulnerable sink that absorbs what begain as $android_deep_link which constitutes a potential vulnerability. 
 
 
 ## How to make focuson useful
