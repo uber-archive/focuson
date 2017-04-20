@@ -49,7 +49,7 @@ Focuson runs quickly, in testing taking ~15 sec for 100kb of python.
 1. cd focuson
 2. virtualenv venv
 3. source venv/bin/activate
-4. pip install -r requirements.tst
+4. pip install -r requirements.txt
 5. python focuson.py <dir>
 
 
